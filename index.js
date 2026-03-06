@@ -1,16 +1,18 @@
-// index.js - Bybit Squeeze Scanner Ottimizzato 30m
+// Bybit Squeeze Scanner PRO 30m
 
 import axios from "axios";
 
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
+
 const BASE = "https://api.bybit.com";
 
 let lastOI = {};
-const REQUEST_DELAY_MS = 350;     // ~3 req/sec → sicuro con rate limit pubblici
-const MAX_PARALLEL = 5;           // numero massimo di richieste parallele
 
-// ────────────── FUNZIONI DI BASE ──────────────
+const REQUEST_DELAY_MS = 350;
+const MAX_PARALLEL = 5;
+
+// ─────────────────────────────
 
 async function sendTelegram(msg) {
   try {
@@ -24,172 +26,234 @@ async function sendTelegram(msg) {
   }
 }
 
-async function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+function delay(ms){
+  return new Promise(r=>setTimeout(r,ms));
 }
+
+// ─────────────────────────────
 
 async function getPairs() {
-  try {
-    const res = await axios.get(`${BASE}/v5/market/instruments-info`, {
-      params: { category: "linear" }
-    });
-    return res.data.result.list
-      .filter(p => p.quoteCoin === "USDT" && p.status === "Trading")
-      .map(p => p.symbol);
-  } catch (err) {
-    console.error("getPairs error:", err.message);
-    return [];
-  }
+
+  const res = await axios.get(`${BASE}/v5/market/instruments-info`, {
+    params:{category:"linear"}
+  });
+
+  return res.data.result.list
+    .filter(p => p.quoteCoin==="USDT" && p.status==="Trading")
+    .map(p=>p.symbol);
 }
 
-async function getTicker(symbol) {
-  const res = await axios.get(`${BASE}/v5/market/tickers`, {
-    params: { category: "linear", symbol }
+// ─────────────────────────────
+
+async function getTicker(symbol){
+
+  const res = await axios.get(`${BASE}/v5/market/tickers`,{
+    params:{category:"linear",symbol}
   });
+
   return res.data.result.list[0];
 }
 
-async function getKlines(symbol, interval = "30", limit = 11) {
-  const res = await axios.get(`${BASE}/v5/market/kline`, {
-    params: { category: "linear", symbol, interval, limit }
+// ─────────────────────────────
+
+async function getKlines(symbol){
+
+  const res = await axios.get(`${BASE}/v5/market/kline`,{
+    params:{
+      category:"linear",
+      symbol,
+      interval:"30",
+      limit:11
+    }
   });
+
   return res.data.result.list;
 }
 
-async function getLongShortRatio(symbol) {
-  try {
-    const res = await axios.get(`${BASE}/v5/market/account-ratio`, {
-      params: {
-        category: "linear",
+// ─────────────────────────────
+
+async function getLongShortRatio(symbol){
+
+  try{
+
+    const res = await axios.get(`${BASE}/v5/market/account-ratio`,{
+      params:{
+        category:"linear",
         symbol,
-        period: "30min",
-        limit: 1
+        period:"30min",
+        limit:1
       }
     });
-    const data = res.data.result.list?.[0];
-    if (!data) return 1;
-    const buy  = parseFloat(data.buyRatio)  || 0.5;
-    const sell = parseFloat(data.sellRatio) || 0.5;
-    return buy / sell;
-  } catch {
+
+    const d = res.data.result.list?.[0];
+
+    if(!d) return 1;
+
+    const buy = parseFloat(d.buyRatio)||0.5;
+    const sell = parseFloat(d.sellRatio)||0.5;
+
+    return buy/sell;
+
+  }catch{
     return 1;
   }
 }
 
-// ────────────── SCORING & CLASSIFICAZIONE ──────────────
+// ─────────────────────────────
 
-function scoreSetup(data) {
-  let score = 0;
-  let bias = "NEUTRO";
+function classify(score){
 
-  if (data.oiChange > 6)   score += 4;
-  if (data.oiChange > 10)  score += 5;
-  if (data.range < 1.2) score += 3;
-  if (data.range < 0.8) score += 4;
-  if (data.volumeSpike > 2.2) score += 2;
-  if (data.volumeSpike > 3.5) score += 4;
-  if (Math.abs(data.funding) > 0.0006) score += 2;
-  if (Math.abs(data.funding) > 0.001)  score += 3;
+  if(score>=14) return "🔥 NUCLEARE";
+  if(score>=11) return "🚀 OTTIMO";
+  if(score>=9) return "✅ BUONO";
 
-  const lsr = data.longShortRatio;
-  if (lsr > 2.0) {
-    score += 4;
-    bias = "SHORT";
-  } else if (lsr < 0.55) {
-    score += 4;
-    bias = "LONG";
-  }
-
-  if (data.funding > 0.0008 && lsr > 1.8) bias = "SHORT";
-  if (data.funding < -0.0008 && lsr < 0.6) bias = "LONG";
-
-  return { score, bias };
-}
-
-function classify(score) {
-  if (score >= 12) return "🔥 NUCLEARE";
-  if (score >= 9)  return "🚀 OTTIMO";
-  if (score >= 6)  return "✅ BUONO";
   return null;
 }
 
-// ────────────── ANALISI SINGOLO SIMBOLO ──────────────
+// ─────────────────────────────
 
-async function scanSymbol(symbol) {
-  try {
+async function scanSymbol(symbol,signals){
+
+  try{
+
     const ticker = await getTicker(symbol);
-    const klines = await getKlines(symbol, "30", 11);
 
-    const oi     = parseFloat(ticker.openInterest || 0);
-    const funding = parseFloat(ticker.fundingRate  || 0);
+    const volume24h = parseFloat(ticker.turnover24h||0);
 
-    // Protezione OI invalido
-    if (!lastOI[symbol] || isNaN(oi) || oi <= 0 || isNaN(lastOI[symbol]) || lastOI[symbol] <= 0) {
+    if(volume24h < 2000000) return;
+
+    const klines = await getKlines(symbol);
+
+    const oi = parseFloat(ticker.openInterest||0);
+    const funding = parseFloat(ticker.fundingRate||0);
+
+    if(!lastOI[symbol]){
       lastOI[symbol] = oi;
       return;
     }
 
-    const oiChange = ((oi - lastOI[symbol]) / lastOI[symbol]) * 100;
-    lastOI[symbol] = oi;
+    const oiChange = ((oi-lastOI[symbol])/lastOI[symbol])*100;
 
-    const prices = klines.slice(1, 11).map(k => parseFloat(k[4]));
-    if (prices.length < 8) return;
+    lastOI[symbol]=oi;
 
-    const high = Math.max(...prices);
-    const low  = Math.min(...prices);
-    const mid  = (high + low) / 2;
-    const range = ((high - low) / mid) * 100;
+    if(oiChange < 5) return;
 
-    const volumes = klines.slice(1).map(k => parseFloat(k[5]));
-    const avgVol = volumes.slice(1).reduce((a,b)=>a+b,0)/(volumes.length-1||1);
-    const volumeSpike = volumes[0] / avgVol;
+    const closes = klines.slice(1).map(k=>parseFloat(k[4]));
 
-    const longShortRatio = await getLongShortRatio(symbol);
+    const high = Math.max(...closes);
+    const low = Math.min(...closes);
 
-    const data = { oiChange, funding, range, volumeSpike, longShortRatio };
-    const { score, bias } = scoreSetup(data);
+    const mid = (high+low)/2;
+
+    const range = ((high-low)/mid)*100;
+
+    if(range > 2) return;
+
+    const volumes = klines.slice(1).map(k=>parseFloat(k[5]));
+
+    const avgVol =
+      volumes.slice(1).reduce((a,b)=>a+b,0)/(volumes.length-1||1);
+
+    const volumeSpike = volumes[0]/avgVol;
+
+    if(volumeSpike < 1.8) return;
+
+    const lsr = await getLongShortRatio(symbol);
+
+    let score = 0;
+    let bias = "NEUTRO";
+
+    if(oiChange>6) score+=3;
+    if(oiChange>10) score+=5;
+    if(oiChange>15) score+=6;
+
+    if(range<1.2) score+=2;
+    if(range<0.8) score+=3;
+
+    if(volumeSpike>2) score+=2;
+    if(volumeSpike>3.5) score+=4;
+
+    if(Math.abs(funding)>0.0008) score+=2;
+
+    if(lsr>2.4){
+      score+=4;
+      bias="SHORT";
+    }
+
+    if(lsr<0.45){
+      score+=4;
+      bias="LONG";
+    }
+
     const quality = classify(score);
 
-    if (!quality) return;
+    if(!quality) return;
 
-    const msg = 
-      `*${quality} SIGNAL* 🚨\n\n` +
-      `**${symbol}**   |   ${bias}\n` +
-      `Score: **${score}**\n` +
-      `OI Δ: ${oiChange.toFixed(1)}%\n` +
-      `Funding: ${funding.toFixed(6)}\n` +
-      `Range (~5h): ${range.toFixed(2)}%\n` +
-      `Vol Spike: ${volumeSpike.toFixed(1)}x\n` +
-      `L/S ratio: ${longShortRatio.toFixed(2)}\n` +
-      `\n${new Date().toLocaleTimeString('it-IT')}`;
+    const msg =
+`*${quality} SIGNAL* 🚨
 
-    console.log(msg.replace(/\*/g,''));
-    await sendTelegram(msg);
+**${symbol}** | ${bias}
 
-  } catch (err) {
-    if (!err.message?.includes("404") && !err.message?.includes("429")) {
-      console.log(`${symbol} → error: ${err.message}`);
+Score: *${score}*
+
+OI Δ: ${oiChange.toFixed(1)}%
+Funding: ${funding.toFixed(6)}
+Range (~5h): ${range.toFixed(2)}%
+Vol Spike: ${volumeSpike.toFixed(1)}x
+L/S ratio: ${lsr.toFixed(2)}
+
+${new Date().toLocaleTimeString('it-IT')}`;
+
+    signals.push({score,msg});
+
+  }catch(err){
+
+    if(!err.message.includes("404") &&
+       !err.message.includes("429")){
+      console.log(symbol,"error",err.message);
     }
+
   }
+
 }
 
-// ────────────── SCANNER PRINCIPALE PARALLELO ──────────────
+// ─────────────────────────────
 
-async function scanner() {
-  console.log(`\n─────────────── ${new Date().toLocaleString('it-IT')} ───────────────`);
+async function scanner(){
+
+  console.log("\nSCAN",new Date().toLocaleString("it-IT"));
+
   const pairs = await getPairs();
-  console.log(`Scanning ${pairs.length} USDT perpetual pairs...`);
 
-  for (let i = 0; i < pairs.length; i += MAX_PARALLEL) {
-    const batch = pairs.slice(i, i + MAX_PARALLEL);
-    await Promise.all(batch.map(s => scanSymbol(s)));
+  let signals=[];
+
+  for(let i=0;i<pairs.length;i+=MAX_PARALLEL){
+
+    const batch = pairs.slice(i,i+MAX_PARALLEL);
+
+    await Promise.all(
+      batch.map(s=>scanSymbol(s,signals))
+    );
+
     await delay(REQUEST_DELAY_MS);
   }
 
-  console.log("Scan completato.\n");
+  signals
+    .sort((a,b)=>b.score-a.score)
+    .slice(0,6)
+    .forEach(s=>{
+      console.log(s.msg.replace(/\*/g,""));
+      sendTelegram(s.msg);
+    });
+
+  console.log("Scan completato");
+
 }
 
-// ────────────── AVVIO ──────────────
-console.log("Bybit Squeeze Scanner avviato...");
-scanner();                           // prima esecuzione immediata
-setInterval(scanner, 30 * 60 * 1000); // poi ogni 30 minuti
+// ─────────────────────────────
+
+console.log("Bybit Squeeze Scanner PRO avviato");
+
+scanner();
+
+setInterval(scanner,30*60*1000);
