@@ -1,18 +1,25 @@
 {
   "name": "bybit-squeeze-scanner",
   "version": "1.0.0",
-  "description": "Bybit USDT perpetual squeeze scanner with Telegram alerts",
-  "main": "src/scanner.js",
+  "description": "Scanner Bybit perpetual USDT per setup squeeze / OI spike con alert Telegram",
+  "main": "index.js",
+  "type": "module",
   "scripts": {
-    "start": "node src/scanner.js"
+    "start": "node index.js",
+    "start:prod": "pm2 start index.js --name bybit-scanner",
+    "logs": "pm2 logs bybit-scanner",
+    "stop": "pm2 stop bybit-scanner",
+    "restart": "pm2 restart bybit-scanner",
+    "status": "pm2 list"
   },
   "dependencies": {
-    "axios": "^1.7.0",
-    "dotenv": "^16.4.0"
+    "axios": "^1.7.7"
   },
+  "devDependencies": {},
   "engines": {
-    "node": ">=18"
+    "node": ">=18.0.0"
   },
-  "author": "tuo-nome",
-  "license": "MIT"
+  "author": "Tu",
+  "license": "UNLICENSED",
+  "private": true
 }
