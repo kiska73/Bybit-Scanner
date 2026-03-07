@@ -1,7 +1,5 @@
 // BYBIT SQUEEZE SCANNER SIMPLE – Versione FINALE Solo Bybit (Holder vs Top Trader)
-// OI in aumento + Divergenza reale (Holder vs Top Trader) + OI/MC
-// FILTRO: solo coppie con volume 24h > 2.000.000 USDT
-// SCANSIONE: ogni ORA (60 minuti)
+// + MESSAGGIO INIZIO SCAN su Telegram (così vedi che il bot è vivo!)
 
 const axios = require('axios');
 
@@ -12,8 +10,8 @@ const BASE = "https://api.bybit.com";
 
 let lastOI = {};
 
-const SCAN_INTERVAL = 1000 * 60 * 60;   // ← 1 ORA (come richiesto)
-const REQUEST_DELAY = 2200;             // 2.2s (sicuro)
+const SCAN_INTERVAL = 1000 * 60 * 60;   // 1 ORA
+const REQUEST_DELAY = 2200;             // 2.2s
 
 //────────────────────────────
 
@@ -70,20 +68,13 @@ async function getTicker(symbol) {
 }
 
 //────────────────────────────
-// HOLDER (All Traders / Retail) → accountType: 0
+// HOLDER (Retail)
 async function getHolderRatio(symbol) {
   try {
     const res = await axios.get(`${BASE}/v5/market/account-ratio`, {
-      params: {
-        category: "linear",
-        symbol,
-        period: "1h",
-        limit: 1,
-        accountType: 0
-      },
+      params: { category: "linear", symbol, period: "1h", limit: 1, accountType: 0 },
       timeout: 8000
     });
-
     const d = res.data.result.list?.[0];
     if (!d) return 1;
     const buy  = parseFloat(d.buyRatio)  || 0;
@@ -95,20 +86,13 @@ async function getHolderRatio(symbol) {
 }
 
 //────────────────────────────
-// TOP TRADER (Whale / Top 100) → accountType: 1
+// TOP TRADER (Whales)
 async function getTopTraderRatio(symbol) {
   try {
     const res = await axios.get(`${BASE}/v5/market/account-ratio`, {
-      params: {
-        category: "linear",
-        symbol,
-        period: "1h",
-        limit: 1,
-        accountType: 1
-      },
+      params: { category: "linear", symbol, period: "1h", limit: 1, accountType: 1 },
       timeout: 8000
     });
-
     const d = res.data.result.list?.[0];
     if (!d) return 1;
     const buy  = parseFloat(d.buyRatio)  || 0;
@@ -148,9 +132,7 @@ async function scanSymbol(symbol) {
     const oi     = parseFloat(ticker.openInterest);
     const volume = parseFloat(ticker.turnover24h);
 
-    // FILTRO VOLUME > 2 MILIONI (come richiesto)
     if (volume < 2_000_000) return;
-
     if (!price || !oi || !volume || oi <= 0) return;
 
     const prevOI = lastOI[symbol];
@@ -188,11 +170,11 @@ Volume 24h: <b>${(volume/1_000_000).toFixed(1)}M</b>
 ${new Date().toLocaleString("it-IT", { timeZone: "Europe/Rome" })}
     `.trim();
 
-    console.log(`✅ SEGNALE: ${symbol} → ${direction} (Vol: ${(volume/1_000_000).toFixed(1)}M)`);
+    console.log(`✅ SEGNALE: ${symbol} → ${direction}`);
     await sendTelegram(msg);
 
   } catch (err) {
-    console.log(`${symbol} → errore: ${err.message}`);
+    console.log(`${symbol} → errore`);
   }
 }
 
@@ -202,20 +184,34 @@ async function scanner() {
   console.log(`\n══════ SCAN START ── ${new Date().toLocaleString("it-IT")} ══════`);
 
   const pairs = await getPairs();
-  console.log(`Coppie da scansionare: ${pairs.length} (solo vol >2M)`);
+  const numPairs = pairs.length;
+  const estimatedMin = Math.ceil((numPairs * REQUEST_DELAY) / 1000 / 60);
+
+  // ── MESSAGGIO INIZIO SCAN SU TELEGRAM ──
+  const startMsg = `
+🔎 <b>Scan iniziato</b>
+
+${numPairs} coppie da controllare
+Tempo stimato: <b>${estimatedMin} minuti</b>
+
+${new Date().toLocaleString("it-IT", { timeZone: "Europe/Rome" })}
+  `.trim();
+
+  await sendTelegram(startMsg);
+  console.log(`📡 Messaggio "Scan iniziato" inviato (${numPairs} coppie - ~${estimatedMin} min)`);
 
   for (const symbol of pairs) {
     await scanSymbol(symbol);
     await delay(REQUEST_DELAY);
   }
 
-  console.log("Scan completato.");
+  console.log("✅ Scan completato.");
 }
 
 //────────────────────────────
 
 (async () => {
-  console.log("🚀 Bybit Squeeze Scanner avviato – ogni ORA + solo vol >2M");
+  console.log("🚀 Bybit Squeeze Scanner avviato – ogni ORA + messaggio inizio scan");
 
   while (true) {
     try {
