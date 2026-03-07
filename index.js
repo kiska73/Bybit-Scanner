@@ -6,8 +6,9 @@ const TELEGRAM_CHAT_ID   = '820279313';
 const BASE = "https://api.bybit.com";
 let lastOI = {};
 
-const SCAN_INTERVAL = 1000 * 60 * 30; // 30 minuti
-const MAX_CONCURRENT = 5;
+const SCAN_INTERVAL    = 1000 * 60 * 30; // 30 min
+const MIN_OI_INCREASE  = 0.10;           // +10% minimo per trigger
+const MAX_CONCURRENT   = 3;              // Abbassato per rate limit
 
 //────────────────────────────
 async function sendTelegram(msg) {
@@ -40,36 +41,50 @@ async function getTicker(symbol) {
 }
 
 //────────────────────────────
-// Recupera holder ratio e funding
-async function getHolderAndFunding(symbol) {
+// Recupera account ratio (≈ retail-heavy) + funding dal ticker
+async function getRatioAndFunding(symbol) {
   try {
-    const res = await axios.get(`${BASE}/v5/market/account-ratio`, {
-      params: { category: "linear", symbol, period: "1h", limit: 10, accountType: 0 },
+    // Ratio account (long/short holders)
+    const ratioRes = await axios.get(`${BASE}/v5/market/account-ratio`, {
+      params: { category: "linear", symbol, period: "1h", limit: 10 },
       timeout: 8000
     });
-    const list = res.data.result.list || [];
-    if (!list.length) return null;
+    const ratioList = ratioRes.data.result.list || [];
+    if (!ratioList.length) return null;
 
-    let totalBuy = 0, totalSell = 0, totalFunding = 0;
-    for (const d of list) {
-      totalBuy += parseFloat(d.buyRatio) || 0;
+    let totalBuy = 0, totalSell = 0;
+    for (const d of ratioList) {
+      totalBuy  += parseFloat(d.buyRatio)  || 0;
       totalSell += parseFloat(d.sellRatio) || 0;
-      totalFunding += parseFloat(d.fundingRate) || 0;
     }
-    const avgBuy = totalBuy / list.length;
-    const avgSell = totalSell / list.length;
-    const avgFunding = totalFunding / list.length;
+    const avgBuy  = totalBuy  / ratioList.length;
+    const avgSell = totalSell / ratioList.length;
 
-    return { buy: avgBuy, sell: avgSell, funding: avgFunding };
+    // Funding dal ticker (più affidabile e veloce)
+    const ticker = await getTicker(symbol);
+    if (!ticker) return null;
+    const funding = parseFloat(ticker.fundingRate) || 0;
+
+    return { buy: avgBuy, sell: avgSell, funding };
   } catch { return null; }
 }
 
 //────────────────────────────
-function classifyQuality(holder, funding, oiMc) {
-  // HIGH QUALITY: holder molto sbilanciato e funding alto
-  if (holder > 0.8 && funding > 0.02 && oiMc > 0.18) return "🔥 HIGH QUALITY";
-  // LOW QUALITY / prudente: holder >70% e funding moderato
-  if (holder > 0.7 && funding < 0.02 && oiMc > 0.12) return "⚡ LOW QUALITY";
+function classifyQuality(holderLongPct, funding, oiMc) {
+  const lsRatio = holderLongPct / (1 - holderLongPct + 0.0001); // evita /0
+
+  if (holderLongPct > 0.70 && funding > 0.0003 && oiMc > 0.15) {
+    return "🔥 HIGH QUALITY (crowd long crowded)";
+  }
+  if (holderLongPct < 0.35 && funding < -0.0003 && oiMc > 0.12) {
+    return "🔥 HIGH QUALITY (crowd short crowded)";
+  }
+  if (holderLongPct > 0.65 && oiMc > 0.10) {
+    return "⚡ MEDIUM (long bias)";
+  }
+  if (holderLongPct < 0.40 && oiMc > 0.10) {
+    return "⚡ MEDIUM (short bias)";
+  }
   return null;
 }
 
@@ -78,40 +93,43 @@ async function scanSymbol(symbol, messages) {
   try {
     const ticker = await getTicker(symbol);
     if (!ticker) return;
-    const price = parseFloat(ticker.lastPrice);
-    const oi = parseFloat(ticker.openInterest);
-    const volume = parseFloat(ticker.turnover24h);
-    if (volume < 5_000_000 || !price || !oi || oi <= 0) return;
+    const price   = parseFloat(ticker.lastPrice);
+    const oi      = parseFloat(ticker.openInterest);
+    const volume  = parseFloat(ticker.turnover24h);
+    if (volume < 10_000_000 || !price || !oi || oi <= 0) return; // alzato a 10M
 
     const prevOI = lastOI[symbol];
     lastOI[symbol] = oi;
-    if (!prevOI || oi <= prevOI) return; // OI deve crescere
 
-    const data = await getHolderAndFunding(symbol);
+    if (!prevOI) return;
+    const oiIncrease = (oi - prevOI) / prevOI;
+    if (oiIncrease < MIN_OI_INCREASE) return;
+
+    const data = await getRatioAndFunding(symbol);
     if (!data) return;
-    const holderRatio = data.buy / (data.buy + data.sell);
-    const funding = data.funding;
 
-    // Calcola OI/MC proxy
-    const oiUsd = oi * price;
-    const marketCapProxy = volume * 3;
-    const oiMc = oiUsd / marketCapProxy;
+    const holderLongPct = data.buy / (data.buy + data.sell);
+    const funding       = data.funding;
 
-    const quality = classifyQuality(holderRatio, funding, oiMc);
+    const oiUsd       = oi * price;
+    const marketCapProxy = volume * 2.5; // un po' più conservativo
+    const oiMc        = oiUsd / marketCapProxy;
+
+    const quality = classifyQuality(holderLongPct, funding, oiMc);
     if (!quality) return;
 
-    // Direzione basata su holder
-    const direction = holderRatio > 0.5 ? "🚨 Possible LONG" : "🚨 Possible SHORT";
+    const direction = holderLongPct > 0.5 ? "🚨 Possible SHORT squeeze" : "🚨 Possible LONG squeeze";
 
     messages.push(`
 <b>${quality}</b>
 <b>${symbol}</b>
 ${direction}
-Holder L/S: <b>${(holderRatio/(1-holderRatio)).toFixed(2)}</b>
-Funding Rate: <b>${(funding*100).toFixed(2)}%</b>
+Holder L/S: <b>${(holderLongPct / (1 - holderLongPct + 0.0001)).toFixed(2)}</b>
+Funding: <b>${(funding * 100).toFixed(4)}%</b>
+OI ↑: <b>+${(oiIncrease * 100).toFixed(1)}%</b>
 OI/MC: <b>${oiMc.toFixed(3)}</b>
-Volume 24h: <b>${(volume/1_000_000).toFixed(1)}M</b>
-`);
+Vol 24h: <b>${(volume / 1_000_000).toFixed(1)}M</b>
+    `);
   } catch (err) { console.log(`${symbol} → errore: ${err.message}`); }
 }
 
@@ -120,6 +138,7 @@ async function scanAllSymbols(pairs, messages) {
   for (let i = 0; i < pairs.length; i += MAX_CONCURRENT) {
     const batch = pairs.slice(i, i + MAX_CONCURRENT);
     await Promise.all(batch.map(s => scanSymbol(s, messages)));
+    await delay(400); // piccolo delay tra batch per rate limit
   }
 }
 
@@ -127,16 +146,16 @@ async function scanAllSymbols(pairs, messages) {
 async function scanner() {
   console.log(`\n══════ SCAN START ── ${new Date().toLocaleString("it-IT")} ══════`);
   const pairs = await getPairs();
-  console.log(`Coppie da scansionare: ${pairs.length} (solo vol >5M)`);
+  console.log(`Coppie da scansionare: ${pairs.length}`);
 
   const messages = [];
   await scanAllSymbols(pairs, messages);
 
   if (messages.length > 0) {
-    const finalMsg = `<b>📊 Bybit Scanner Report – ${new Date().toLocaleString("it-IT", { timeZone: "Europe/Rome" })}</b>\n\n` + messages.join("\n—————————\n");
+    const finalMsg = `<b>📊 Bybit Crowd + Funding Scanner – ${new Date().toLocaleString("it-IT", { timeZone: "Europe/Rome" })}</b>\n\n` + messages.join("\n—————————\n");
     await sendTelegram(finalMsg);
   } else {
-    console.log("Nessun segnale rilevante in questo scan.");
+    console.log("Nessun segnale.");
   }
 
   console.log("Scan completato.");
@@ -144,12 +163,12 @@ async function scanner() {
 
 //────────────────────────────
 (async () => {
-  console.log("🚀 Bybit Holder + Funding Scanner avviato – ogni 30 min");
+  console.log("🚀 Bybit Crowd Squeeze Scanner avviato – ogni 30 min");
   while (true) {
     try { await scanner(); }
     catch (err) {
       console.log("❌ Crash:", err.message);
-      await sendTelegram(`❌ Scanner crash: ${err.message}`);
+      await sendTelegram(`❌ Crash: ${err.message}`);
     }
     await delay(SCAN_INTERVAL);
   }
