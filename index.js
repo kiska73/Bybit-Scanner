@@ -1,5 +1,6 @@
-// BYBIT SQUEEZE SCANNER PRO V2
-// 30m timeframe
+// BYBIT SQUEEZE SCANNER PRO V5
+// Aggiornato 7 marzo 2026 - Versione definitiva e completa
+// Tutte le correzioni applicate (parsing L/S, range, ranking, volume safety)
 
 import axios from "axios";
 
@@ -10,8 +11,8 @@ const BASE = "https://api.bybit.com";
 
 let lastOI = {};
 
-const REQUEST_DELAY_MS = 350;
-const MAX_PARALLEL = 5;
+const REQUEST_DELAY_MS = 650;
+const MAX_PARALLEL = 3;
 
 //─────────────────────────────
 
@@ -37,7 +38,6 @@ function delay(ms) {
 //─────────────────────────────
 
 async function getPairs() {
-
   const res = await axios.get(`${BASE}/v5/market/instruments-info`, {
     params: { category: "linear" }
   });
@@ -50,21 +50,15 @@ async function getPairs() {
 //─────────────────────────────
 
 async function getTicker(symbol) {
-
   const res = await axios.get(`${BASE}/v5/market/tickers`, {
-    params: {
-      category: "linear",
-      symbol
-    }
+    params: { category: "linear", symbol }
   });
-
   return res.data.result.list[0];
 }
 
 //─────────────────────────────
 
 async function getKlines(symbol) {
-
   const res = await axios.get(`${BASE}/v5/market/kline`, {
     params: {
       category: "linear",
@@ -73,16 +67,14 @@ async function getKlines(symbol) {
       limit: 12
     }
   });
-
   return res.data.result.list;
 }
 
 //─────────────────────────────
-
+// LONG/SHORT RATIO - PARSING SICURO (correzione #1)
+//─────────────────────────────
 async function getLongShortRatio(symbol) {
-
   try {
-
     const res = await axios.get(`${BASE}/v5/market/account-ratio`, {
       params: {
         category: "linear",
@@ -93,15 +85,20 @@ async function getLongShortRatio(symbol) {
     });
 
     const d = res.data.result.list?.[0];
-
     if (!d) return 1;
 
-    const buy = parseFloat(d.buyRatio || 0.5);
-    const sell = parseFloat(d.sellRatio || 0.5);
+    const buy  = parseFloat(d.buyRatio);
+    const sell = parseFloat(d.sellRatio);
+
+    if (!buy || !sell) return 1;           // evita NaN
+    if (sell < 0.01) return 999;
 
     return buy / sell;
 
-  } catch {
+  } catch (err) {
+    if (!err.message.includes("404") && !err.message.includes("429")) {
+      console.log(symbol, "errore L/S ratio:", err.message);
+    }
     return 1;
   }
 }
@@ -109,63 +106,55 @@ async function getLongShortRatio(symbol) {
 //─────────────────────────────
 
 function classify(score) {
-
-  if (score >= 15) return "🔥 NUCLEARE";
-  if (score >= 12) return "🚀 ALTA";
-  if (score >= 9) return "✅ BUONA";
-
+  if (score >= 19) return "🔥 NUCLEARE";
+  if (score >= 15) return "🚀 ALTA";
+  if (score >= 11) return "✅ BUONA";
   return null;
 }
 
 //─────────────────────────────
 
 async function scanSymbol(symbol, signals) {
-
   try {
-
     const ticker = await getTicker(symbol);
-
     const volume24h = parseFloat(ticker.turnover24h || 0);
-
     if (volume24h < 2000000) return;
 
     const klines = await getKlines(symbol);
-
     const oi = parseFloat(ticker.openInterest || 0);
     const funding = parseFloat(ticker.fundingRate || 0);
 
-    if (!lastOI[symbol]) {
-      lastOI[symbol] = oi;
-      return;
+    let oiChange = 0;
+    if (lastOI[symbol]) {
+      oiChange = ((oi - lastOI[symbol]) / lastOI[symbol]) * 100;
     }
-
-    const oiChange = ((oi - lastOI[symbol]) / lastOI[symbol]) * 100;
-
     lastOI[symbol] = oi;
 
+    if (oi < 500000) return;
     if (oiChange < 5) return;
 
-    const closes = klines.slice(1).map(k => parseFloat(k[4]));
-    const lastClose = parseFloat(klines[0][4]);
-
-    const high = Math.max(...closes);
-    const low = Math.min(...closes);
-
+    // Range 6h - correzione #2
+    const allCloses = klines.map(k => parseFloat(k[4]));
+    const lastClose = allCloses[0];
+    const high = Math.max(...allCloses);
+    const low = Math.min(...allCloses);
     const mid = (high + low) / 2;
-
     const range = ((high - low) / mid) * 100;
 
-    if (range > 2) return;
+    if (range > 1.8) return;
 
-    const priceChange = ((lastClose - closes[0]) / closes[0]) * 100;
+    // Price change
+    const prevClose = allCloses[1] || lastClose;
+    const priceChange = ((lastClose - prevClose) / prevClose) * 100;
 
-    const volumes = klines.slice(1).map(k => parseFloat(k[5]));
+    // Volume spike - correzione #4 (sicurezza avgVol = 0)
+    const currentVol = parseFloat(klines[0][5]);
+    const prevVolumes = klines.slice(1).map(k => parseFloat(k[5]));
+    const avgVol = prevVolumes.reduce((a, b) => a + b, 0) / (prevVolumes.length || 1);
 
-    const avgVol =
-      volumes.slice(1).reduce((a, b) => a + b, 0) / (volumes.length - 1 || 1);
+    if (avgVol === 0) return;
 
-    const volumeSpike = volumes[0] / avgVol;
-
+    const volumeSpike = currentVol / avgVol;
     if (volumeSpike < 1.8) return;
 
     const lsr = await getLongShortRatio(symbol);
@@ -173,141 +162,92 @@ async function scanSymbol(symbol, signals) {
     let score = 0;
     let bias = "NEUTRO";
 
-//─────────────────────────────
-// OI SCORE
-//─────────────────────────────
+    // OI
+    if (oiChange > 20) score += 8;
+    else if (oiChange > 12) score += 5;
+    else if (oiChange > 7) score += 3;
 
-    if (oiChange > 6) score += 3;
-    if (oiChange > 10) score += 5;
-    if (oiChange > 15) score += 6;
+    // Range
+    if (range < 0.7) score += 4;
+    else if (range < 1.0) score += 2;
 
-//─────────────────────────────
-// RANGE COMPRESSION
-//─────────────────────────────
+    // Volume
+    if (volumeSpike > 3.5) score += 5;
+    else if (volumeSpike > 2.2) score += 3;
+    else if (volumeSpike > 1.8) score += 1;
 
-    if (range < 1.2) score += 2;
-    if (range < 0.8) score += 3;
+    // Funding
+    if (Math.abs(funding) > 0.001) score += 3;
+    else if (Math.abs(funding) > 0.0006) score += 1;
 
-//─────────────────────────────
-// VOLUME
-//─────────────────────────────
+    // L/S Ratio
+    if (lsr > 2.8) { score += 5; bias = "SHORT"; }
+    else if (lsr < 0.40) { score += 5; bias = "LONG"; }
+    else if (lsr > 2.0) { score += 2; bias = "SHORT"; }
+    else if (lsr < 0.55) { score += 2; bias = "LONG"; }
 
-    if (volumeSpike > 2) score += 2;
-    if (volumeSpike > 3.5) score += 4;
+    // Price direction
+    if (bias === "SHORT" && priceChange > 0.6) score += 2;
+    if (bias === "LONG" && priceChange < -0.6) score += 2;
 
-//─────────────────────────────
-// FUNDING
-//─────────────────────────────
-
-    if (Math.abs(funding) > 0.0008) score += 2;
-
-//─────────────────────────────
-// LONG SHORT BIAS
-//─────────────────────────────
-
-    if (lsr > 2.5) {
-
-      score += 4;
-      bias = "SHORT";
-
-    }
-
-    if (lsr < 0.45) {
-
-      score += 4;
-      bias = "LONG";
-
-    }
-
-//─────────────────────────────
-// PRICE DIRECTION FILTER
-//─────────────────────────────
-
-    if (bias === "SHORT" && priceChange > 0.5) score += 1;
-
-    if (bias === "LONG" && priceChange < -0.5) score += 1;
-
-//─────────────────────────────
+    if (oi < 800000) score = Math.max(0, score - 3);
 
     const quality = classify(score);
-
     if (!quality) return;
 
-//─────────────────────────────
-
-    const msg =
-`*${quality} SIGNAL* 🚨
+    signals.push({
+      score,
+      funding: Math.abs(funding),
+      msg: `*${quality} SIGNAL* 🚨
 
 *${symbol}* | ${bias}
 
 Score: *${score}*
-
 OI Δ: ${oiChange.toFixed(2)}%
 Funding: ${funding.toFixed(6)}
-Range 5h: ${range.toFixed(2)}%
+Range 6h: ${range.toFixed(2)}%
 Price Δ: ${priceChange.toFixed(2)}%
 Vol Spike: ${volumeSpike.toFixed(2)}x
 L/S Ratio: ${lsr.toFixed(2)}
 
-${new Date().toLocaleTimeString("it-IT")}`;
-
-//─────────────────────────────
-
-    signals.push({ score, msg });
+${new Date().toLocaleTimeString("it-IT")}`
+    });
 
   } catch (err) {
-
-    if (
-      !err.message.includes("404") &&
-      !err.message.includes("429")
-    ) {
-      console.log(symbol, "error", err.message);
+    if (!err.message.includes("404") && !err.message.includes("429")) {
+      console.log(symbol, "errore:", err.message);
     }
-
   }
-
 }
 
 //─────────────────────────────
 
 async function scanner() {
-
-  console.log("\nSCAN", new Date().toLocaleString("it-IT"));
+  console.log("\n=== SCAN INIZIATO ===", new Date().toLocaleString("it-IT"));
 
   const pairs = await getPairs();
-
   let signals = [];
 
   for (let i = 0; i < pairs.length; i += MAX_PARALLEL) {
-
     const batch = pairs.slice(i, i + MAX_PARALLEL);
-
-    await Promise.all(
-      batch.map(s => scanSymbol(s, signals))
-    );
-
+    await Promise.all(batch.map(s => scanSymbol(s, signals)));
     await delay(REQUEST_DELAY_MS);
-
   }
 
+  // Ranking corretto - correzione #3
   signals
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => (b.score + b.funding * 1000) - (a.score + a.funding * 1000))
     .slice(0, 6)
     .forEach(s => {
-
       console.log(s.msg.replace(/\*/g, ""));
       sendTelegram(s.msg);
-
     });
 
-  console.log("Scan completato");
-
+  console.log("Scan completato -", signals.length, "segnali trovati");
 }
 
 //─────────────────────────────
 
-console.log("Bybit Squeeze Scanner PRO v2 avviato");
-
+console.log("🚀 Bybit Squeeze Scanner PRO V5 avviato - marzo 2026");
 scanner();
-
 setInterval(scanner, 30 * 60 * 1000);
