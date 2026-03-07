@@ -8,8 +8,8 @@ let lastOI = {};
 
 const SCAN_INTERVAL      = 1000 * 60 * 30;   // 30 minuti
 const MIN_OI_INCREASE    = 0.10;             // +10% minimo OI
-const VOLUME_MIN         = 5_000_000;       // Volume 24h minimo
-const MAX_CONCURRENT     = 3;                // Per evitare rate limit
+const VOLUME_MIN         = 2_000_000;       // Volume 24h minimo
+const MAX_CONCURRENT     = 3;                // Per rate limit
 
 //────────────────────────────
 async function sendTelegram(msg) {
@@ -48,10 +48,8 @@ async function getTicker(symbol) {
 }
 
 //────────────────────────────
-// Recupera account ratio (proxy retail/small holder) + funding attuale
 async function getRatioAndFunding(symbol) {
   try {
-    // Account ratio (holder long/short)
     const ratioRes = await axios.get(`${BASE}/v5/market/account-ratio`, {
       params: { category: "linear", symbol, period: "1h", limit: 10 },
       timeout: 8000
@@ -67,7 +65,6 @@ async function getRatioAndFunding(symbol) {
     const avgBuy  = totalBuy  / ratioList.length;
     const avgSell = totalSell / ratioList.length;
 
-    // Funding attuale dal ticker
     const ticker = await getTicker(symbol);
     if (!ticker) return null;
     const funding = parseFloat(ticker.fundingRate) || 0;
@@ -77,15 +74,26 @@ async function getRatioAndFunding(symbol) {
 }
 
 //────────────────────────────
-// CLASSIFICAZIONE FORTE / HIGH QUALITY
 function classifyQuality(holderLongPct, funding, oiMc, oiIncrease) {
+  const absFunding = Math.abs(funding);
+
+  // NUCLEARE: casi estremi
+  if (holderLongPct > 0.80 && funding > 0.0020 && oiMc > 0.18 && oiIncrease > 0.25) {
+    return { level: "NUCLEARE", squeeze: "SHORT SQUEEZE" };
+  }
+  if (holderLongPct < 0.20 && funding < -0.0020 && oiMc > 0.18 && oiIncrease > 0.25) {
+    return { level: "NUCLEARE", squeeze: "LONG SQUEEZE" };
+  }
+
+  // BUONO: segnali forti standard
   if (holderLongPct > 0.70 && funding > 0.0010 && oiMc > 0.15 && oiIncrease > 0.15) {
-    return "🔥 FORTE HIGH QUALITY - SHORT SQUEEZE";
+    return { level: "BUONO", squeeze: "SHORT SQUEEZE" };
   }
   if (holderLongPct < 0.35 && funding < -0.0010 && oiMc > 0.15 && oiIncrease > 0.15) {
-    return "🔥 FORTE HIGH QUALITY - LONG SQUEEZE";
+    return { level: "BUONO", squeeze: "LONG SQUEEZE" };
   }
-  return null; // Solo segnali forti
+
+  return null;
 }
 
 //────────────────────────────
@@ -119,20 +127,29 @@ async function scanSymbol(symbol, messages) {
     const quality = classifyQuality(holderLongPct, funding, oiMc, oiIncrease);
     if (!quality) return;
 
-    // Direzione chiara
+    const { level, squeeze } = quality;
+
+    // Direzione e testo
     let direction = "";
-    if (holderLongPct > 0.70) {
-      direction = "🚨 Possible SHORT SQUEEZE\n<i>piccoli aprono MASSICCIO long</i>";
+    let emoji = level === "NUCLEARE" ? "☢️" : "🔥";
+    let smallText = "";
+
+    if (squeeze === "SHORT SQUEEZE") {
+      direction = `🚨 Possible SHORT SQUEEZE`;
+      smallText = "<i>piccoli aprono MASSICCIO long</i>";
     } else {
-      direction = "🚨 Possible LONG SQUEEZE\n<i>piccoli aprono MASSICCIO short</i>";
+      direction = `🚨 Possible LONG SQUEEZE`;
+      smallText = "<i>piccoli aprono MASSICCIO short</i>";
     }
 
     const lsRatio = holderLongPct / (1 - holderLongPct + 0.0001);
 
     messages.push(`
-<b>${quality}</b>
+<b>${emoji} ${level} - ${squeeze}</b>
 <b>${symbol}</b>
 ${direction}
+${smallText}
+
 Holder L/S: <b>${lsRatio.toFixed(2)}</b> (${(holderLongPct*100).toFixed(1)}% long)
 Funding: <b>${(funding*100).toFixed(4)}%</b> ${funding > 0 ? "(longs pagano shorts)" : "(shorts pagano longs)"}
 OI ↑: <b>+${(oiIncrease*100).toFixed(1)}%</b>
@@ -149,7 +166,7 @@ async function scanAllSymbols(pairs, messages) {
   for (let i = 0; i < pairs.length; i += MAX_CONCURRENT) {
     const batch = pairs.slice(i, i + MAX_CONCURRENT);
     await Promise.all(batch.map(s => scanSymbol(s, messages)));
-    await delay(400); // delay anti rate-limit
+    await delay(400);
   }
 }
 
@@ -163,12 +180,12 @@ async function scanner() {
   await scanAllSymbols(pairs, messages);
 
   if (messages.length > 0) {
-    const finalMsg = `<b>📊 Bybit FORTE SQUEEZE Scanner – ${new Date().toLocaleString("it-IT", { timeZone: "Europe/Rome" })}</b>\n\n` 
+    const finalMsg = `<b>📊 Bybit SQUEEZE Scanner – ${new Date().toLocaleString("it-IT", { timeZone: "Europe/Rome" })}</b>\n\n` 
                    + messages.join("\n—————————\n");
     await sendTelegram(finalMsg);
     console.log(`✅ ${messages.length} segnale/i inviato/i`);
   } else {
-    console.log("Nessun segnale FORTE in questo scan.");
+    console.log("Nessun segnale BUONO o NUCLEARE.");
   }
 
   console.log("Scan completato.");
@@ -176,8 +193,9 @@ async function scanner() {
 
 //────────────────────────────
 (async () => {
-  console.log("🚀 Bybit FORTE HIGH QUALITY Squeeze Scanner avviato – ogni 30 min");
-  console.log("Soglie: holder >70% / <35% + funding ±0.10% + OI +15%");
+  console.log("🚀 Bybit BUONO / NUCLEARE Squeeze Scanner avviato – ogni 30 min");
+  console.log("Soglie: BUONO → holder >70%/<35% + funding ±0.10% + OI +15%");
+  console.log("NUCLEARE → holder >80%/<20% + funding ±0.20% + OI +25%");
   
   while (true) {
     try { await scanner(); }
