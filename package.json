@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "description": "Scanner Bybit perpetual USDT per setup squeeze / OI spike con alert Telegram",
   "main": "index.js",
-  "type": "module",
   "scripts": {
     "start": "node index.js",
     "start:prod": "pm2 start index.js --name bybit-scanner",
