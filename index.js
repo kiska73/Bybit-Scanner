@@ -6,8 +6,8 @@ const TELEGRAM_CHAT_ID   = '820279313';
 const BASE = "https://api.bybit.com";
 let lastOI = {};
 
-const SCAN_INTERVAL = 1000 * 60 * 30;   // 30 minuti
-const MAX_CONCURRENT = 5;                // massimo 5 richieste parallele
+const SCAN_INTERVAL = 1000 * 60 * 30; // 30 minuti
+const MAX_CONCURRENT = 5;
 
 //────────────────────────────
 async function sendTelegram(msg) {
@@ -39,78 +39,76 @@ async function getTicker(symbol) {
   } catch { return null; }
 }
 
-async function getHolderRatio(symbol) {
+//────────────────────────────
+// Recupera holder ratio e funding
+async function getHolderAndFunding(symbol) {
   try {
-    const res = await axios.get(`${BASE}/v5/market/account-ratio`, { params: { category: "linear", symbol, period: "1h", limit: 1, accountType: 0 }, timeout: 8000 });
-    const d = res.data.result.list?.[0]; if (!d) return 1;
-    const buy = parseFloat(d.buyRatio) || 0, sell = parseFloat(d.sellRatio) || 0;
-    return sell > 0.001 ? buy / sell : 1;
-  } catch { return 1; }
-}
+    const res = await axios.get(`${BASE}/v5/market/account-ratio`, {
+      params: { category: "linear", symbol, period: "1h", limit: 10, accountType: 0 },
+      timeout: 8000
+    });
+    const list = res.data.result.list || [];
+    if (!list.length) return null;
 
-async function getTopTraderRatio(symbol) {
-  try {
-    const res = await axios.get(`${BASE}/v5/market/account-ratio`, { params: { category: "linear", symbol, period: "1h", limit: 1, accountType: 1 }, timeout: 8000 });
-    const d = res.data.result.list?.[0]; if (!d) return 1;
-    const buy = parseFloat(d.buyRatio) || 0, sell = parseFloat(d.sellRatio) || 0;
-    return sell > 0.001 ? buy / sell : 1;
-  } catch { return 1; }
+    let totalBuy = 0, totalSell = 0, totalFunding = 0;
+    for (const d of list) {
+      totalBuy += parseFloat(d.buyRatio) || 0;
+      totalSell += parseFloat(d.sellRatio) || 0;
+      totalFunding += parseFloat(d.fundingRate) || 0;
+    }
+    const avgBuy = totalBuy / list.length;
+    const avgSell = totalSell / list.length;
+    const avgFunding = totalFunding / list.length;
+
+    return { buy: avgBuy, sell: avgSell, funding: avgFunding };
+  } catch { return null; }
 }
 
 //────────────────────────────
-// Divergenza molto restrittiva
-function checkDivergence(holder, top) {
-  if (holder > 4 && top < 0.5) return { type: "SHORT", strength: "STRONG" };
-  if (holder < 0.35 && top > 3) return { type: "LONG",  strength: "STRONG" };
-  return null;
-}
-
-// Trend estremo più restrittivo
-function checkExtremeTrend(holder, top, prevOI, currentOI) {
-  if (prevOI && currentOI <= prevOI * 1.10) return null; // OI deve crescere almeno 10%
-  if (holder > 4 && top > 4) return { type: "LONG", strength: "EXTREME" };
-  if (holder < 0.25 && top < 0.25) return { type: "SHORT", strength: "EXTREME" };
-  return null;
-}
-
-// Segnali “HIGH QUALITY” più restrittivi
-function classifyQuality(oiMc) {
-  if (oiMc > 0.18) return "🔥 HIGH QUALITY"; // top assoluto
-  if (oiMc > 0.12) return "⚡ LOW QUALITY"; // minore, non invia notifiche se vuoi solo HIGH
+function classifyQuality(holder, funding, oiMc) {
+  // HIGH QUALITY: holder molto sbilanciato e funding alto
+  if (holder > 0.8 && funding > 0.02 && oiMc > 0.18) return "🔥 HIGH QUALITY";
+  // LOW QUALITY / prudente: holder >70% e funding moderato
+  if (holder > 0.7 && funding < 0.02 && oiMc > 0.12) return "⚡ LOW QUALITY";
   return null;
 }
 
 //────────────────────────────
 async function scanSymbol(symbol, messages) {
   try {
-    const ticker = await getTicker(symbol); if (!ticker) return;
-    const price  = parseFloat(ticker.lastPrice);
-    const oi     = parseFloat(ticker.openInterest);
+    const ticker = await getTicker(symbol);
+    if (!ticker) return;
+    const price = parseFloat(ticker.lastPrice);
+    const oi = parseFloat(ticker.openInterest);
     const volume = parseFloat(ticker.turnover24h);
-    if (volume < 5_000_000 || !price || !oi || oi <= 0) return; // Volume minimo 5M
+    if (volume < 5_000_000 || !price || !oi || oi <= 0) return;
 
-    const prevOI = lastOI[symbol]; lastOI[symbol] = oi;
+    const prevOI = lastOI[symbol];
+    lastOI[symbol] = oi;
+    if (!prevOI || oi <= prevOI) return; // OI deve crescere
 
-    const holder = await getHolderRatio(symbol);
-    const top    = await getTopTraderRatio(symbol);
+    const data = await getHolderAndFunding(symbol);
+    if (!data) return;
+    const holderRatio = data.buy / (data.buy + data.sell);
+    const funding = data.funding;
 
-    const div = checkDivergence(holder, top) || checkExtremeTrend(holder, top, prevOI, oi);
-    if (!div) return;
-
+    // Calcola OI/MC proxy
     const oiUsd = oi * price;
     const marketCapProxy = volume * 3;
     const oiMc = oiUsd / marketCapProxy;
-    const quality = classifyQuality(oiMc);
+
+    const quality = classifyQuality(holderRatio, funding, oiMc);
     if (!quality) return;
 
-    const direction = div.type === "SHORT" ? "🚨 Possible SHORT" : "🚨 Possible LONG";
+    // Direzione basata su holder
+    const direction = holderRatio > 0.5 ? "🚨 Possible LONG" : "🚨 Possible SHORT";
 
     messages.push(`
 <b>${quality}</b>
 <b>${symbol}</b>
-${direction} (${div.strength})
-Holder L/S: <b>${holder.toFixed(2)}</b> ← Retail
-Top Trader L/S: <b>${top.toFixed(2)}</b> ← Whales/Top 100
+${direction}
+Holder L/S: <b>${(holderRatio/(1-holderRatio)).toFixed(2)}</b>
+Funding Rate: <b>${(funding*100).toFixed(2)}%</b>
 OI/MC: <b>${oiMc.toFixed(3)}</b>
 Volume 24h: <b>${(volume/1_000_000).toFixed(1)}M</b>
 `);
@@ -118,7 +116,6 @@ Volume 24h: <b>${(volume/1_000_000).toFixed(1)}M</b>
 }
 
 //────────────────────────────
-// Parallelizzazione
 async function scanAllSymbols(pairs, messages) {
   for (let i = 0; i < pairs.length; i += MAX_CONCURRENT) {
     const batch = pairs.slice(i, i + MAX_CONCURRENT);
@@ -147,10 +144,10 @@ async function scanner() {
 
 //────────────────────────────
 (async () => {
-  console.log("🚀 Bybit Squeeze + Extreme Trend Scanner SERIO avviato – ogni 30 min");
+  console.log("🚀 Bybit Holder + Funding Scanner avviato – ogni 30 min");
   while (true) {
     try { await scanner(); }
-    catch (err) { 
+    catch (err) {
       console.log("❌ Crash:", err.message);
       await sendTelegram(`❌ Scanner crash: ${err.message}`);
     }
