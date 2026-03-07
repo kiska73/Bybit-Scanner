@@ -60,23 +60,23 @@ async function getTopTraderRatio(symbol) {
 //────────────────────────────
 // Divergenza molto restrittiva
 function checkDivergence(holder, top) {
-  if (holder > 3 && top < 0.6) return { type: "SHORT", strength: "STRONG" };
-  if (holder < 0.4 && top > 2.5) return { type: "LONG",  strength: "STRONG" };
+  if (holder > 4 && top < 0.5) return { type: "SHORT", strength: "STRONG" };
+  if (holder < 0.35 && top > 3) return { type: "LONG",  strength: "STRONG" };
   return null;
 }
 
 // Trend estremo più restrittivo
 function checkExtremeTrend(holder, top, prevOI, currentOI) {
-  if (prevOI && currentOI <= prevOI * 1.05) return null; // OI deve crescere almeno 5%
-  if (holder > 3 && top > 3) return { type: "LONG", strength: "EXTREME" };
-  if (holder < 0.3 && top < 0.3) return { type: "SHORT", strength: "EXTREME" };
+  if (prevOI && currentOI <= prevOI * 1.10) return null; // OI deve crescere almeno 10%
+  if (holder > 4 && top > 4) return { type: "LONG", strength: "EXTREME" };
+  if (holder < 0.25 && top < 0.25) return { type: "SHORT", strength: "EXTREME" };
   return null;
 }
 
 // Segnali “HIGH QUALITY” più restrittivi
 function classifyQuality(oiMc) {
-  if (oiMc > 0.12) return "🔥 HIGH QUALITY";
-  if (oiMc > 0.08) return "⚡ LOW QUALITY";
+  if (oiMc > 0.18) return "🔥 HIGH QUALITY"; // top assoluto
+  if (oiMc > 0.12) return "⚡ LOW QUALITY"; // minore, non invia notifiche se vuoi solo HIGH
   return null;
 }
 
