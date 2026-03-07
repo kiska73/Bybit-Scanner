@@ -7,7 +7,7 @@ const BASE = "https://api.bybit.com";
 let lastOI = {};
 
 const SCAN_INTERVAL = 1000 * 60 * 30;   // 30 minuti
-const MAX_CONCURRENT = 5;                // massimo 5 richieste in parallelo
+const MAX_CONCURRENT = 5;                // massimo 5 richieste parallele
 
 //────────────────────────────
 async function sendTelegram(msg) {
@@ -19,15 +19,12 @@ async function sendTelegram(msg) {
   } catch (err) { console.log("❌ Telegram error:", err.message); }
 }
 
-//────────────────────────────
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 //────────────────────────────
 async function getPairs() {
   try {
-    const res = await axios.get(`${BASE}/v5/market/instruments-info`, {
-      params: { category: "linear" }, timeout: 10000
-    });
+    const res = await axios.get(`${BASE}/v5/market/instruments-info`, { params: { category: "linear" }, timeout: 10000 });
     if (res.data.retCode !== 0) return [];
     return res.data.result.list
       .filter(p => p.quoteCoin === "USDT" && p.status === "Trading")
@@ -35,21 +32,16 @@ async function getPairs() {
   } catch { return []; }
 }
 
-//────────────────────────────
 async function getTicker(symbol) {
   try {
-    const res = await axios.get(`${BASE}/v5/market/tickers`, {
-      params: { category: "linear", symbol }, timeout: 8000
-    });
+    const res = await axios.get(`${BASE}/v5/market/tickers`, { params: { category: "linear", symbol }, timeout: 8000 });
     return res.data.result.list?.[0] || null;
   } catch { return null; }
 }
 
 async function getHolderRatio(symbol) {
   try {
-    const res = await axios.get(`${BASE}/v5/market/account-ratio`, {
-      params: { category: "linear", symbol, period: "1h", limit: 1, accountType: 0 }, timeout: 8000
-    });
+    const res = await axios.get(`${BASE}/v5/market/account-ratio`, { params: { category: "linear", symbol, period: "1h", limit: 1, accountType: 0 }, timeout: 8000 });
     const d = res.data.result.list?.[0]; if (!d) return 1;
     const buy = parseFloat(d.buyRatio) || 0, sell = parseFloat(d.sellRatio) || 0;
     return sell > 0.001 ? buy / sell : 1;
@@ -58,9 +50,7 @@ async function getHolderRatio(symbol) {
 
 async function getTopTraderRatio(symbol) {
   try {
-    const res = await axios.get(`${BASE}/v5/market/account-ratio`, {
-      params: { category: "linear", symbol, period: "1h", limit: 1, accountType: 1 }, timeout: 8000
-    });
+    const res = await axios.get(`${BASE}/v5/market/account-ratio`, { params: { category: "linear", symbol, period: "1h", limit: 1, accountType: 1 }, timeout: 8000 });
     const d = res.data.result.list?.[0]; if (!d) return 1;
     const buy = parseFloat(d.buyRatio) || 0, sell = parseFloat(d.sellRatio) || 0;
     return sell > 0.001 ? buy / sell : 1;
@@ -68,35 +58,36 @@ async function getTopTraderRatio(symbol) {
 }
 
 //────────────────────────────
+// Divergenza molto restrittiva
 function checkDivergence(holder, top) {
-  if (holder > 2.5 && top < 0.7) return { type: "SHORT", strength: "STRONG" };
-  if (holder > 1.5 && top < 0.9) return { type: "SHORT", strength: "NORMAL" };
-  if (holder < 0.5 && top > 2.0) return { type: "LONG",  strength: "STRONG" };
-  if (holder < 0.7 && top > 1.5) return { type: "LONG",  strength: "NORMAL" };
+  if (holder > 3 && top < 0.6) return { type: "SHORT", strength: "STRONG" };
+  if (holder < 0.4 && top > 2.5) return { type: "LONG",  strength: "STRONG" };
   return null;
 }
 
+// Trend estremo più restrittivo
 function checkExtremeTrend(holder, top, prevOI, currentOI) {
-  if (prevOI && currentOI <= prevOI) return null;
-  if (holder > 2 && top > 2) return { type: "LONG", strength: "EXTREME" };
-  if (holder < 0.5 && top < 0.5) return { type: "SHORT", strength: "EXTREME" };
+  if (prevOI && currentOI <= prevOI * 1.05) return null; // OI deve crescere almeno 5%
+  if (holder > 3 && top > 3) return { type: "LONG", strength: "EXTREME" };
+  if (holder < 0.3 && top < 0.3) return { type: "SHORT", strength: "EXTREME" };
   return null;
 }
 
+// Segnali “HIGH QUALITY” più restrittivi
 function classifyQuality(oiMc) {
-  if (oiMc > 0.08) return "🔥 HIGH QUALITY";
-  if (oiMc > 0.05) return "⚡ LOW QUALITY";
+  if (oiMc > 0.12) return "🔥 HIGH QUALITY";
+  if (oiMc > 0.08) return "⚡ LOW QUALITY";
   return null;
 }
 
 //────────────────────────────
-async function scanSymbol(symbol) {
+async function scanSymbol(symbol, messages) {
   try {
     const ticker = await getTicker(symbol); if (!ticker) return;
     const price  = parseFloat(ticker.lastPrice);
     const oi     = parseFloat(ticker.openInterest);
     const volume = parseFloat(ticker.turnover24h);
-    if (volume < 2_000_000 || !price || !oi || oi <= 0) return;
+    if (volume < 5_000_000 || !price || !oi || oi <= 0) return; // Volume minimo 5M
 
     const prevOI = lastOI[symbol]; lastOI[symbol] = oi;
 
@@ -114,34 +105,24 @@ async function scanSymbol(symbol) {
 
     const direction = div.type === "SHORT" ? "🚨 Possible SHORT" : "🚨 Possible LONG";
 
-    const msg = `
+    messages.push(`
 <b>${quality}</b>
-
 <b>${symbol}</b>
-
 ${direction} (${div.strength})
-
 Holder L/S: <b>${holder.toFixed(2)}</b> ← Retail
 Top Trader L/S: <b>${top.toFixed(2)}</b> ← Whales/Top 100
-
 OI/MC: <b>${oiMc.toFixed(3)}</b>
 Volume 24h: <b>${(volume/1_000_000).toFixed(1)}M</b>
-
-${new Date().toLocaleString("it-IT", { timeZone: "Europe/Rome" })}
-    `.trim();
-
-    console.log(`✅ SEGNALE: ${symbol} → ${direction} (Vol: ${(volume/1_000_000).toFixed(1)}M)`);
-    await sendTelegram(msg);
-
+`);
   } catch (err) { console.log(`${symbol} → errore: ${err.message}`); }
 }
 
 //────────────────────────────
-// Funzione per parallelizzare le scansioni
-async function scanAllSymbols(pairs) {
+// Parallelizzazione
+async function scanAllSymbols(pairs, messages) {
   for (let i = 0; i < pairs.length; i += MAX_CONCURRENT) {
     const batch = pairs.slice(i, i + MAX_CONCURRENT);
-    await Promise.all(batch.map(s => scanSymbol(s)));
+    await Promise.all(batch.map(s => scanSymbol(s, messages)));
   }
 }
 
@@ -149,19 +130,27 @@ async function scanAllSymbols(pairs) {
 async function scanner() {
   console.log(`\n══════ SCAN START ── ${new Date().toLocaleString("it-IT")} ══════`);
   const pairs = await getPairs();
-  console.log(`Coppie da scansionare: ${pairs.length} (solo vol >2M)`);
-  await scanAllSymbols(pairs);
+  console.log(`Coppie da scansionare: ${pairs.length} (solo vol >5M)`);
+
+  const messages = [];
+  await scanAllSymbols(pairs, messages);
+
+  if (messages.length > 0) {
+    const finalMsg = `<b>📊 Bybit Scanner Report – ${new Date().toLocaleString("it-IT", { timeZone: "Europe/Rome" })}</b>\n\n` + messages.join("\n—————————\n");
+    await sendTelegram(finalMsg);
+  } else {
+    console.log("Nessun segnale rilevante in questo scan.");
+  }
+
   console.log("Scan completato.");
 }
 
 //────────────────────────────
 (async () => {
-  console.log("🚀 Bybit Squeeze + Extreme Trend Scanner avviato – ogni 30 min + solo vol >2M");
-
+  console.log("🚀 Bybit Squeeze + Extreme Trend Scanner SERIO avviato – ogni 30 min");
   while (true) {
-    try {
-      await scanner();
-    } catch (err) {
+    try { await scanner(); }
+    catch (err) { 
       console.log("❌ Crash:", err.message);
       await sendTelegram(`❌ Scanner crash: ${err.message}`);
     }
