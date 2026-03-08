@@ -18,7 +18,6 @@ const BASE_BINANCE = "https://fapi.binance.com";
 // ==========================================
 
 let PAIRS = [];
-
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function getPosition(current, history) {
@@ -30,30 +29,34 @@ function getPosition(current, history) {
 }
 
 // ==========================================
-// Bybit Retail Ratio (buy/sell account ratio)
+// Bybit Retail Ratio (account-ratio con buy/sell)
 // ==========================================
-async function getBybitRetail(symbol, tickerMap) {
+async function getBybitData(symbol, tickerMap) {
     try {
         const res = await axios.get(`${BASE_BYBIT}/v5/market/account-ratio`, {
             params: { category: 'linear', symbol, period: '1h', limit: LOOKBACK },
             timeout: 6000
         });
-
         const list = res.data?.result?.list || [];
-        if (list.length < 1) return null;
+        if (list.length < 5) return null;
 
-        const buyHistory = list.map(x => parseFloat(x.buyRatio || 0));
-        const currentBuy = buyHistory[0] * 100; // in %
+        const longHist = list.map(x => parseFloat(x.buyRatio || 0) * 100); // buyRatio = % long accounts
+        const currentLong = longHist[0];
 
-        return { bybitBuyPos: getPosition(currentBuy, buyHistory), bybitBuy: currentBuy };
+        const ticker = tickerMap.get(symbol);
+        return {
+            bybitLongPos: getPosition(currentLong, longHist),
+            bybitLong: currentLong,
+            priceFallback: ticker ? parseFloat(ticker.lastPrice) : 0,
+            fund: ticker ? (parseFloat(ticker.fundingRate) * 100).toFixed(4) : '0.0000'
+        };
     } catch (err) {
-        if (err.response?.status !== 404) console.log(`Bybit retail err ${symbol}: ${err.message}`);
         return null;
     }
 }
 
 // ==========================================
-// Binance Holder (global account) + Top Trader
+// Binance Holder + Top Trader
 // ==========================================
 async function getBinanceRatios(symbol) {
     try {
@@ -71,120 +74,124 @@ async function getBinanceRatios(symbol) {
         const holder = resHolder.data || [];
         const top    = resTop.data    || [];
 
-        if (holder.length < 1 || top.length < 1) return null;
+        if (holder.length < 5 || top.length < 5) return null;
 
         const holderLongHist = holder.map(x => parseFloat(x.longAccount) * 100);
         const topLongHist    = top.map(x => parseFloat(x.longAccount) * 100);
 
-        const holderLong = holderLongHist[0];
-        const topLong    = topLongHist[0];
-
-        const price = parseFloat(holder[0]?.price || tickerMap.get(symbol)?.lastPrice || 0);
-
         return {
-            holderPos: getPosition(holderLong, holderLongHist),
-            topPos:    getPosition(topLong,    topLongHist),
-            holderLong,
-            topLong,
-            price
+            holderPos: getPosition(holderLongHist[0], holderLongHist),
+            topPos:    getPosition(topLongHist[0],    topLongHist),
+            holderLong: holderLongHist[0],
+            topLong:    topLongHist[0],
+            price: parseFloat(holder[0]?.price || 0)
         };
     } catch (err) {
-        console.log(`Binance err ${symbol}: ${err.message}`);
+        console.log(`Binance skip ${symbol}: ${err.message}`);
         return null;
     }
 }
 
 // ==========================================
-// SCAN PRINCIPALE
+// SCAN
 // ==========================================
 async function scan() {
-    console.log(`\n--- [${new Date().toLocaleTimeString()}] Scan Bybit+Binance ---`);
+    console.log(`\n--- [${new Date().toLocaleTimeString()}] Scan ---`);
 
-    // Tickers Bybit per volume + funding + price fallback
-    const tickRes = await axios.get(`${BASE_BYBIT}/v5/market/tickers`, { params: { category: 'linear' }, timeout: 10000 });
-    const tickerMap = new Map(tickRes.data.result.list.map(t => [t.symbol, t]));
+    try {
+        const tickRes = await axios.get(`${BASE_BYBIT}/v5/market/tickers`, { params: { category: 'linear' }, timeout: 10000 });
+        const tickerMap = new Map(tickRes.data.result.list.map(t => [t.symbol, t]));
 
-    const highVolPairs = PAIRS.filter(s => {
-        const t = tickerMap.get(s);
-        return t && parseFloat(t.turnover24h || 0) >= MIN_VOL_2M;
-    });
+        const highVolPairs = PAIRS.filter(s => {
+            const t = tickerMap.get(s);
+            return t && parseFloat(t.turnover24h || 0) >= MIN_VOL_2M;
+        });
 
-    console.log(`High vol pairs: ${highVolPairs.length}`);
+        console.log(`Coppie da analizzare: ${highVolPairs.length}`);
 
-    let messages = [];
+        let messages = [];
 
-    for (let i = 0; i < highVolPairs.length; i += 8) {  // batch piccolo per Binance
-        const batch = highVolPairs.slice(i, i + 8);
+        for (let i = 0; i < highVolPairs.length; i += 5) {
+            const batch = highVolPairs.slice(i, i + 5);
 
-        await Promise.all(batch.map(async symbol => {
-            const binance = await getBinanceRatios(symbol);
-            if (!binance) return;
+            await Promise.all(batch.map(async symbol => {
+                const [binance, bybit] = await Promise.all([
+                    getBinanceRatios(symbol),
+                    getBybitData(symbol, tickerMap)
+                ]);
 
-            const { holderPos, topPos, holderLong, topLong, price } = binance;
+                if (!binance) return;
 
-            const ticker = tickerMap.get(symbol);
-            const fund = ticker ? (parseFloat(ticker.fundingRate) * 100).toFixed(4) : 'N/A';
+                const price = binance.price || bybit?.priceFallback || 0;
+                const fund  = bybit?.fund || '0.0000';
 
-            let type = "";
-            if (holderPos >= SOGLIA_ALTA && topPos >= SOGLIA_ALTA) {
-                type = "2 alti long forte";
-            } else if (holderPos <= SOGLIA_BASSA && topPos <= SOGLIA_BASSA) {
-                type = "2 bassi short forte";
-            } else if (
-                (holderPos >= SOGLIA_ALTA && topPos <= SOGLIA_BASSA) ||
-                (holderPos <= SOGLIA_BASSA && topPos >= SOGLIA_ALTA)
-            ) {
-                type = "SQUEEZE possibile (divergenza)";
-            }
+                let type = "";
+                const hPos = binance.holderPos;
+                const tPos = binance.topPos;
 
-            if (type) {
-                messages.push(`
-<b>${type.toUpperCase()}</b>
+                if (hPos >= SOGLIA_ALTA && tPos <= SOGLIA_BASSA) {
+                    type = "⚡ SQUEEZE LONG (Divergenza)";
+                } else if (hPos <= SOGLIA_BASSA && tPos >= SOGLIA_ALTA) {
+                    type = "⚠️ SHORT SQUEEZE (Divergenza)";
+                } else if (hPos >= SOGLIA_ALTA && tPos >= SOGLIA_ALTA) {
+                    type = "🚀 LONG FORTE UNANIME";
+                } else if (hPos <= SOGLIA_BASSA && tPos <= SOGLIA_BASSA) {
+                    type = "📉 SHORT FORTE UNANIME";
+                }
+
+                if (type) {
+                    const bybitLine = bybit 
+                        ? `Bybit Retail Long: <b>${bybit.bybitLong.toFixed(1)}%</b> (${bybit.bybitLongPos.toFixed(0)}% range)`
+                        : `Bybit Retail: <i>non disp.</i>`;
+
+                    messages.push(`
+<b>${type}</b>
 <b>${symbol}</b> @ ${price.toFixed(2)}
 
-Holder Binance: <b>${holderLong.toFixed(0)}%</b> long
-Top Binance: <b>${topLong.toFixed(0)}%</b> long
+Binance Holder: <b>${binance.holderLong.toFixed(1)}%</b> (${hPos.toFixed(0)}%)
+Binance Top: <b>${binance.topLong.toFixed(1)}%</b> (${tPos.toFixed(0)}%)
+${bybitLine}
 Funding: <b>${fund}%</b> ${parseFloat(fund) > 0 ? '🔴' : '🟢'}
-                `.trim());
-            }
-        }));
+                    `.trim());
+                }
+            }));
 
-        await sleep(300); // respiro per Binance rate limit
-    }
-
-    if (messages.length > 0) {
-        for (let j = 0; j < messages.length; j += 4) {
-            const chunk = messages.slice(j, j + 4).join("\n\n——————\n\n");
-            await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-                chat_id: TELEGRAM_CHAT_ID,
-                text: `<b>📊 RATIO ALERT (Binance + Bybit retail)</b>\n\n${chunk}`,
-                parse_mode: "HTML"
-            }).catch(e => console.log("Telegram err:", e.message));
+            await sleep(500);
         }
-        console.log(`✅ ${messages.length} segnali inviati`);
-    } else {
-        console.log("Nessun segnale estremo");
+
+        if (messages.length > 0) {
+            for (let j = 0; j < messages.length; j += 4) {
+                const chunk = messages.slice(j, j + 4).join("\n\n———\n\n");
+                await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                    chat_id: TELEGRAM_CHAT_ID,
+                    text: `<b>📊 RADAR BINANCE + BYBIT</b>\n\n${chunk}`,
+                    parse_mode: "HTML"
+                });
+            }
+            console.log(`✅ Inviati ${messages.length} segnali`);
+        } else {
+            console.log("Nessun segnale");
+        }
+
+    } catch (e) {
+        console.error("Errore scan:", e.message);
     }
 }
 
-// ==========================================
-// AVVIO
-// ==========================================
+// Init pairs da Bybit
 async function init() {
-    console.log("🚀 Radar Bybit+Binance avviato...");
+    console.log("🚀 Avvio...");
     try {
         const res = await axios.get(`${BASE_BYBIT}/v5/market/instruments-info`, { params: { category: "linear" } });
         PAIRS = res.data.result.list
             .filter(p => p.quoteCoin === "USDT" && p.contractType === "LinearPerpetual" && p.status === "Trading")
             .map(p => p.symbol);
-
-        console.log(`Caricate ${PAIRS.length} coppie USDT perp`);
+        console.log(`Coppie caricate: ${PAIRS.length}`);
+        await scan();
+        setInterval(scan, SCAN_INTERVAL);
     } catch (e) {
-        console.error("Errore init pairs:", e.message);
+        console.error("Init fallito:", e.message);
     }
-
-    await scan();
-    setInterval(scan, SCAN_INTERVAL);
 }
 
-init().catch(console.error);
+init();
