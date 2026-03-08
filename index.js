@@ -7,8 +7,8 @@ const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
 // Soglie Percentile (0-100) basate su Min-Max 30gg
-const SOGLIA_ALTA = 85; 
-const SOGLIA_BASSA = 15;
+const SOGLIA_ALTA = 90; 
+const SOGLIA_BASSA = 10;
 
 const LOOKBACK = 720; // 30 giorni (24h * 30)
 const MIN_VOL_24H_USDT = 2000000;
