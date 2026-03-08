@@ -6,17 +6,16 @@ const axios = require('axios');
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
-const SOGLIA_ALTA  = 80;  // Sopra il 90% del range (Soffitto)
-const SOGLIA_BASSA = 20;  // Sotto il 10% del range (Pavimento)
-const LOOKBACK     = 48;  // Ore di storico da analizzare
-const MIN_VOL_2M   = 2000000; // Filtro Volume 24h > 2 Milioni $
+const SOGLIA_ALTA  = 80;  // Vicino al soffitto del grafico (90-100%)
+const SOGLIA_BASSA = 20;  // Vicino al pavimento del grafico (0-10%)
+const LOOKBACK     = 48;  // Ore di storico per definire il range arancione
+const MIN_VOL_2M   = 2000000; // Solo coppie con Volume 24h > 2 Milioni $
 
 const SCAN_INTERVAL = 1000 * 60 * 30; // 30 Minuti
 // ==========================================
 
 const BASE = "https://api.bybit.com";
 
-// Calcola la posizione della linea arancione nel grafico (0-100%)
 function getPosition(current, history) {
     const values = history.map(v => parseFloat(v));
     const max = Math.max(...values);
@@ -30,10 +29,9 @@ async function scan() {
         const res = await axios.get(`${BASE}/v5/market/instruments-info`, { params: { category: "linear" } });
         const pairs = res.data.result.list.filter(p => p.quoteCoin === "USDT").map(p => p.symbol);
         
-        console.log(`\n--- [${new Date().toLocaleTimeString()}] Scansione ${pairs.length} coppie ---`);
+        console.log(`\n--- [${new Date().toLocaleTimeString()}] Analisi ${pairs.length} coppie ---`);
         let messages = [];
 
-        // Scansione a blocchi per non sovraccaricare le API
         for (let i = 0; i < pairs.length; i += 10) {
             const batch = pairs.slice(i, i + 10);
             await Promise.all(batch.map(async (symbol) => {
@@ -46,8 +44,10 @@ async function scan() {
 
                     const ticker = resTick.data.result.list[0];
                     const vol24h = parseFloat(ticker.turnover24h);
+                    const price  = parseFloat(ticker.lastPrice);
+                    const fund   = parseFloat(ticker.fundingRate) * 100;
 
-                    // FILTRO VOLUME 2M
+                    // Filtro Volume 2M
                     if (vol24h < MIN_VOL_2M) return;
 
                     const mData = resM.data.result.list;
@@ -72,15 +72,18 @@ async function scan() {
                     }
 
                     if (type) {
-                        const fund = parseFloat(ticker.fundingRate) * 100;
+                        // Emoji per il funding: verde se negativo (ottimo per long), rosso se positivo
+                        const fEmoji = fund < 0 ? "🟢" : "🔴";
+                        
                         messages.push(`
 <b>${type}</b>
 <b>Coppia:</b> ${symbol}
+<b>Prezzo:</b> ${price}
 ————————————
-🟡 Posizione Top 100: <b>${posT.toFixed(0)}%</b>
-🟠 Posizione Massa: <b>${posM.toFixed(0)}%</b>
-💰 Funding: <b>${fund.toFixed(4)}%</b>
-📊 Volume 24h: <b>$${(vol24h / 1000000).toFixed(2)}M</b>
+🟡 Pos. Top 100: <b>${posT.toFixed(0)}%</b> (Ratio: ${currentT.toFixed(2)})
+🟠 Pos. Massa: <b>${posM.toFixed(0)}%</b> (Ratio: ${currentM.toFixed(2)})
+💰 Funding: <b>${fund.toFixed(4)}%</b> ${fEmoji}
+📊 Vol 24h: <b>$${(vol24h / 1000000).toFixed(2)}M</b>
                         `.trim());
                     }
                 } catch (e) {}
@@ -91,17 +94,13 @@ async function scan() {
         if (messages.length > 0) {
             await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
                 chat_id: TELEGRAM_CHAT_ID, 
-                text: `<b>📊 REPORT ECCEZIONI (Vol > 2M)</b>\n\n` + messages.join("\n\n——————\n\n"), 
+                text: `<b>📊 REPORT RATIO & FUNDING</b>\n\n` + messages.join("\n\n——————\n\n"), 
                 parse_mode: "HTML"
             });
-            console.log(`✅ Inviate ${messages.length} notifiche.`);
-        } else {
-            console.log("Nessuna anomalia trovata.");
+            console.log(`✅ ${messages.length} segnali inviati.`);
         }
-    } catch (e) { console.log("Errore Scanner:", e.message); }
+    } catch (e) { console.log("Errore:", e.message); }
 }
 
-// Avvio
-console.log("🚀 Radar Arancione attivo (Filtro 2M)...");
 setInterval(scan, SCAN_INTERVAL);
 scan();
