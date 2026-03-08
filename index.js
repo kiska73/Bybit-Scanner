@@ -14,6 +14,7 @@ const SOGLIA_BYBIT_SHORT = 20;
 const LOOKBACK           = 48;
 const MIN_VOL_24H_USDT   = 2000000;
 const SCAN_INTERVAL      = 1000 * 60 * 30; // 30 min
+const WALL_SCAN_INTERVAL = 1000 * 30;       // ogni 30s per muri
 
 const CONCURRENCY_LIMIT  = 4;
 const REQUEST_TIMEOUT    = 12000;
@@ -30,7 +31,6 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // ==========================================
 // FUNZIONI HELPER
 // ==========================================
-
 function getRelativePosition(current, history) {
     const values = history.map(v => parseFloat(v)).filter(v => !isNaN(v));
     if (values.length < 2) return 50;
@@ -45,9 +45,8 @@ function getRelativePosition(current, history) {
 }
 
 // ==========================================
-// CARICAMENTO SIMBOLI BINANCE (con refresh periodico)
+// CARICAMENTO SIMBOLI BINANCE
 // ==========================================
-
 async function loadBinanceSymbols() {
     try {
         const binInfo = await axios.get(`${BASE_BINANCE}/fapi/v1/exchangeInfo`, { timeout: 15000 });
@@ -66,7 +65,6 @@ async function loadBinanceSymbols() {
 // ==========================================
 // FETCH DATI SENTIMENT
 // ==========================================
-
 async function fetchSentimentData(symbol, tickerMap) {
     try {
         const [bybitRes, binHolderRes, binTopRes] = await Promise.all([
@@ -109,18 +107,15 @@ async function fetchSentimentData(symbol, tickerMap) {
         const ticker = tickerMap.get(symbol);
         const fundingVal = ticker ? (parseFloat(ticker.fundingRate || 0) * 100).toFixed(4) : '0.0000';
 
-        // ────────────────────────────────────────────────
-        // CALCOLO SCORE per ordinamento segnali (più alto = più rilevante)
-        // ────────────────────────────────────────────────
+        // Score
         const divBybitWhales     = Math.abs(parseFloat(bybitLongPct) - parseFloat(binTopVal));
-        const divRetailWhales    = Math.abs(binHolderPos - binTopPos);          // aggiunta importante
+        const divRetailWhales    = Math.abs(binHolderPos - binTopPos);
         const extremism          = Math.max(binHolderPos, 100 - binHolderPos, binTopPos, 100 - binTopPos);
         const fundingBonus       =
             (parseFloat(fundingVal) > 0.01 && parseFloat(bybitLongPct) > 70) ? 30 :
             (parseFloat(fundingVal) < -0.01 && parseFloat(bybitLongPct) < 30) ? 30 : 0;
 
         const score = divBybitWhales + divRetailWhales + extremism + fundingBonus;
-        // ────────────────────────────────────────────────
 
         return {
             symbol,
@@ -139,10 +134,9 @@ async function fetchSentimentData(symbol, tickerMap) {
 }
 
 // ==========================================
-// SCANNER PRINCIPALE
+// SCANNER SENTIMENT
 // ==========================================
-
-async function scan() {
+async function scanSentiment() {
     if (isScanning) return;
     isScanning = true;
     const start = Date.now();
@@ -152,7 +146,6 @@ async function scan() {
             params: { category: 'linear' },
             timeout: 20000
         });
-
         const tickerMap = new Map(tickersRes.data.result.list.map(t => [t.symbol, t]));
 
         const candidates = PAIRS.filter(s => {
@@ -163,7 +156,7 @@ async function scan() {
             return true;
         });
 
-        console.log(`Scan → ${candidates.length} coppie qualificate`);
+        console.log(`Scan sentiment → ${candidates.length} coppie qualificate`);
 
         let signals = [];
 
@@ -197,7 +190,6 @@ async function scan() {
 
                 if (title) {
                     const fundingSign = parseFloat(res.funding) > 0 ? '🔴 longs pagano' : '🟢 shorts pagano';
-
                     signals.push({
                         text: `
 <b>${emoji} ${title}</b>
@@ -216,7 +208,7 @@ Funding: <b>${res.funding}%</b> ${fundingSign}
             await sleep(600);
         }
 
-        // ORDINA per score decrescente
+        // Ordina per score
         signals.sort((a, b) => b.score - a.score);
 
         if (signals.length > 0) {
@@ -227,22 +219,89 @@ Funding: <b>${res.funding}%</b> ${fundingSign}
                     chat_id: TELEGRAM_CHAT_ID,
                     text: `<b>📊 SENTIMENT ALERT ${new Date().toLocaleTimeString('it-IT')}</b>\n\n${chunk}`,
                     parse_mode: "HTML"
-                }, { timeout: 10000 }).catch(() => {});
+                }).catch(() => {});
             }
         }
 
-        console.log(`Scan completato (${((Date.now() - start)/1000).toFixed(1)}s) — segnali: ${signals.length}`);
+        console.log(`Scan sentiment completato (${((Date.now() - start)/1000).toFixed(1)}s) — segnali: ${signals.length}`);
     } catch (err) {
-        console.error("Errore scan:", err.message);
+        console.error("Errore scan sentiment:", err.message);
     } finally {
         isScanning = false;
     }
 }
 
 // ==========================================
+// SCANNER MURI SPOT
+// ==========================================
+async function fetchBook(symbol, exchange='binance', limit=50) {
+    try {
+        if(exchange==='binance'){
+            const res = await axios.get(`https://api.binance.com/api/v3/depth`, {
+                params: { symbol, limit }
+            });
+            return { bids: res.data.bids, asks: res.data.asks };
+        } else {
+            const res = await axios.get(`${BASE_BYBIT}/spot/quote/v1/depth`, {
+                params: { symbol, limit }
+            });
+            return { bids: res.data.result.bids, asks: res.data.result.asks };
+        }
+    } catch { return null; }
+}
+
+function groupLevels(levels, step) {
+    const grouped = new Map();
+    for (const [price, qty] of levels) {
+        const p = Math.round(parseFloat(price)/step)*step;
+        grouped.set(p, (grouped.get(p)||0)+parseFloat(qty));
+    }
+    return Array.from(grouped.entries()).sort((a,b)=>b[0]-a[0]);
+}
+
+function findWalls(bids, asks) {
+    const topN = 50;
+    const bidSlice = bids.slice(0, topN);
+    const askSlice = asks.slice(0, topN);
+
+    const avgBid = bidSlice.reduce((a,[p,q])=>a+q,0)/bidSlice.length;
+    const avgAsk = askSlice.reduce((a,[p,q])=>a+q,0)/askSlice.length;
+
+    const walls = [];
+    for(const [p,q] of bidSlice){
+        if(q>=10*avgAsk) walls.push({price:p, size:q, side:'BID'});
+    }
+    for(const [p,q] of askSlice){
+        if(q>=10*avgBid) walls.push({price:p, size:q, side:'ASK'});
+    }
+    return walls;
+}
+
+async function scanWalls() {
+    for(const symbol of PAIRS){
+        for(const ex of ['binance','bybit']){
+            const book = await fetchBook(symbol, ex, 50);
+            if(!book) continue;
+            const step = (book.bids[0]?parseFloat(book.bids[0][0]):1)*0.001; // step dinamico
+            const groupedBids = groupLevels(book.bids, step);
+            const groupedAsks = groupLevels(book.asks, step);
+            const walls = findWalls(groupedBids, groupedAsks);
+
+            if(walls.length>0){
+                const msg = walls.map(w=>`${w.side} WALL ${ex.toUpperCase()} → Price: ${w.price} Size: ${w.size.toFixed(4)}`).join("\n");
+                await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                    chat_id: TELEGRAM_CHAT_ID,
+                    text: `<b>🚧 WALL ALERT ${symbol} (${ex.toUpperCase()})</b>\n${msg}`,
+                    parse_mode: 'HTML'
+                }).catch(()=>{});
+            }
+        }
+    }
+}
+
+// ==========================================
 // AVVIO
 // ==========================================
-
 async function initialize() {
     try {
         // Carica coppie Bybit
@@ -250,21 +309,20 @@ async function initialize() {
             params: { category: "linear" },
             timeout: 20000
         });
-
         PAIRS = res.data.result.list
             .filter(p => p.quoteCoin === "USDT" && p.status === "Trading")
             .map(p => p.symbol);
-
         console.log(`Caricate ${PAIRS.length} coppie USDT`);
 
         // Carica cache Binance subito
         await loadBinanceSymbols();
+        setInterval(loadBinanceSymbols, 1000*60*60*12); // refresh ogni 12h
 
-        // Refresh cache Binance ogni 12 ore
-        setInterval(loadBinanceSymbols, 1000 * 60 * 60 * 12);
+        // Scan sentiment e muri
+        await scanSentiment();
+        setInterval(scanSentiment, SCAN_INTERVAL);
+        setInterval(scanWalls, WALL_SCAN_INTERVAL);
 
-        await scan();
-        setInterval(scan, SCAN_INTERVAL);
     } catch (err) {
         console.error("Inizializzazione fallita:", err.message);
     }
