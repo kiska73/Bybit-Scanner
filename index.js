@@ -11,7 +11,7 @@ const SOGLIA_BASSA_BIN   = 10;
 const SOGLIA_BYBIT_LONG  = 80;
 const SOGLIA_BYBIT_SHORT = 20;
 
-const LOOKBACK           = 48;
+const LOOKBACK           = 36;
 const MIN_VOL_24H_USDT   = 2000000;
 const SCAN_INTERVAL      = 1000 * 60 * 30; // 30 min
 
