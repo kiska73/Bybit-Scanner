@@ -6,17 +6,15 @@ const axios = require('axios');
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
-const SOGLIA_ALTA  = 80;  // Vicino al soffitto del grafico (90-100%)
-const SOGLIA_BASSA = 20;  // Vicino al pavimento del grafico (0-10%)
-const LOOKBACK     = 48;  // Ore di storico per definire il range arancione
-const MIN_VOL_2M   = 2000000; // Solo coppie con Volume 24h > 2 Milioni $
+const SOGLIA_ALTA  = 80;  
+const SOGLIA_BASSA = 20;  
+const LOOKBACK     = 48;  
+const MIN_VOL_2M   = 2000000; 
 
-const SCAN_INTERVAL = 1000 * 60 * 30; // 30 Minuti
+const SCAN_INTERVAL = 1000 * 60 * 30; 
 // ==========================================
 
 const BASE = "https://api.bybit.com";
-
-// Utility per attendere (evita Rate Limit)
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 function getPosition(current, history) {
@@ -29,7 +27,6 @@ function getPosition(current, history) {
 
 async function getSignal(symbol) {
     try {
-        // Chiamate parallele con timeout per non restare appesi
         const [resM, resT, resTick] = await Promise.all([
             axios.get(`${BASE}/v5/market/account-ratio`, { params: { category: 'linear', symbol, period: '1h', limit: LOOKBACK }, timeout: 5000 }),
             axios.get(`${BASE}/v5/market/top-trader-account-ratio`, { params: { category: 'linear', symbol, period: '1h', limit: LOOKBACK }, timeout: 5000 }),
@@ -44,7 +41,9 @@ async function getSignal(symbol) {
 
         const mData = resM.data.result?.list;
         const tData = resT.data.result?.list;
-        if (!mData?.length || !tData?.length) return null;
+        
+        // Se Bybit non ha i dati ratio per questa moneta, mData o tData saranno vuoti
+        if (!mData || mData.length === 0 || !tData || tData.length === 0) return null;
 
         const currentM = parseFloat(mData[0].accountRatio);
         const currentT = parseFloat(tData[0].topTraderAccountRatio);
@@ -60,8 +59,10 @@ async function getSignal(symbol) {
             currentT
         };
     } catch (err) {
-        // Logga l'errore sulla singola moneta senza stoppare tutto
-        console.error(`⚠️ Errore su ${symbol}: ${err.message}`);
+        // Silenziamo l'errore 404 (dati non disponibili su Bybit per questa moneta)
+        if (err.response && err.response.status === 404) return null;
+        
+        console.error(`⚠️ Errore tecnico su ${symbol}: ${err.message}`);
         return null;
     }
 }
@@ -69,12 +70,14 @@ async function getSignal(symbol) {
 async function scan() {
     try {
         const res = await axios.get(`${BASE}/v5/market/instruments-info`, { params: { category: "linear" } });
-        const pairs = res.data.result.list.filter(p => p.quoteCoin === "USDT").map(p => p.symbol);
+        // Filtriamo anche le scadenze temporali (es. 27MAR26) per tenere solo i Perpetual
+        const pairs = res.data.result.list
+            .filter(p => p.quoteCoin === "USDT" && !p.symbol.includes('-'))
+            .map(p => p.symbol);
         
-        console.log(`\n--- [${new Date().toLocaleTimeString()}] Analisi ${pairs.length} coppie ---`);
+        console.log(`\n--- [${new Date().toLocaleTimeString()}] Analisi ${pairs.length} coppie supportate ---`);
         let messages = [];
 
-        // Processo a piccoli gruppi (batch)
         for (let i = 0; i < pairs.length; i += 5) {
             const batch = pairs.slice(i, i + 5);
             const results = await Promise.all(batch.map(s => getSignal(s)));
@@ -101,26 +104,23 @@ async function scan() {
                     `.trim());
                 }
             }
-            // Piccolo respiro per le API di Bybit
-            await sleep(200);
+            await sleep(250);
         }
 
         if (messages.length > 0) {
-            // Invio messaggi a blocchi (Telegram ha un limite di caratteri per messaggio)
             for (let i = 0; i < messages.length; i += 5) {
                 const chunk = messages.slice(i, i + 5).join("\n\n——————\n\n");
                 await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
                     chat_id: TELEGRAM_CHAT_ID, text: `<b>📊 REPORT RATIO</b>\n\n${chunk}`, parse_mode: "HTML"
                 });
             }
-            console.log(`✅ ${messages.length} segnali inviati.`);
         }
+        console.log(`Scan terminato. Coppie con anomalie trovate: ${messages.length}`);
     } catch (globalErr) {
-        console.error("❌ ERRORE CRITICO SCANNER:", globalErr.message);
+        console.error("❌ ERRORE CRITICO:", globalErr.message);
     }
 }
 
-// Avvio con gestione errore iniziale
-console.log("🚀 Radar Blindato avviato...");
+console.log("🚀 Radar Arancione Silenziato avviato...");
 scan();
 setInterval(scan, SCAN_INTERVAL);
