@@ -6,8 +6,8 @@ const axios = require('axios');
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
-const SOGLIA_ALTA  = 80;  // Abbassata per più segnali
-const SOGLIA_BASSA = 20;
+const SOGLIA_ALTA  = 60;  // Abbassata per più segnali
+const SOGLIA_BASSA = 40;
 
 const LOOKBACK = 48;
 const MIN_VOL  = 2000000;
