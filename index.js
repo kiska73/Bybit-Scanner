@@ -1,166 +1,116 @@
 const axios = require('axios');
 
+// ==========================================
+// CONFIGURAZIONE PARAMETRI (CAMBIA QUI)
+// ==========================================
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
+
+const SCAN_INTERVAL = 1000 * 60 * 30; // 30 minuti tra ogni scan
+const LOOKBACK      = 48;             // Ore di storico da analizzare (per definire Max/Min)
+
+// SOGLIE DI SENSIBILITÀ (Percentuale rispetto al range 48h)
+// Se metti 90 e 10 è molto rigido (solo picchi estremi)
+// Se metti 75 e 25 è più morbido (beccchi il movimento prima)
+const SOGLIA_ALTA = 80; 
+const SOGLIA_BASSA = 20; 
+// ==========================================
+
 const BASE = "https://api.bybit.com";
 
-const SCAN_INTERVAL    = 1000 * 60 * 30; // 30 minuti
-const MAX_CONCURRENT   = 10;
-const MIN_VOLUME_USDT  = 2_000_000;      // soglia minima turnover 24h in USDT
-
-// SOGLIE ECCEZIONI (linea arancione)
-const HIGH = 3.0;
-const LOW  = 0.5;
-
-async function sendTelegram(msg) {
-    try {
-        await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-            chat_id: TELEGRAM_CHAT_ID,
-            text: msg.trim(),
-            parse_mode: "HTML"
-        });
-    } catch (err) {
-        console.log("❌ Errore invio Telegram:", err.message);
-    }
+function getPositionPercent(current, history) {
+    const values = history.map(v => parseFloat(v));
+    const max = Math.max(...values);
+    const min = Math.min(...values);
+    if (max === min) return 50;
+    return ((current - min) / (max - min)) * 100;
 }
 
-async function getData(symbol) {
+async function getSignal(symbol) {
     try {
-        // 1. Ratio Massa (Account Ratio)
-        const resMassa = await axios.get(`${BASE}/v5/market/account-ratio`, {
-            params: { category: 'linear', symbol, period: '1h', limit: 1 }
+        const resM = await axios.get(`${BASE}/v5/market/account-ratio`, {
+            params: { category: 'linear', symbol, period: '1h', limit: LOOKBACK }
         });
-
-        // 2. Ratio Top 100 (Top Trader Ratio)
-        const resTop = await axios.get(`${BASE}/v5/market/top-trader-account-ratio`, {
-            params: { category: 'linear', symbol, period: '1h', limit: 1 }
+        const resT = await axios.get(`${BASE}/v5/market/top-trader-account-ratio`, {
+            params: { category: 'linear', symbol, period: '1h', limit: LOOKBACK }
         });
+        const resTick = await axios.get(`${BASE}/v5/market/tickers`, { params: { category: 'linear', symbol } });
 
-        // 3. Ticker (funding rate + altre info se servono dopo)
-        const resTicker = await axios.get(`${BASE}/v5/market/tickers`, {
-            params: { category: 'linear', symbol }
-        });
+        const listM = resM.data.result.list;
+        const listT = resT.data.result.list;
+        const ticker = resTick.data.result.list?.[0];
 
-        const m = resMassa.data.result.list?.[0];
-        const t = resTop.data.result.list?.[0];
-        const ticker = resTicker.data.result.list?.[0];
+        if (!listM?.length || !listT?.length || !ticker) return null;
 
-        if (!m || !t || !ticker) return null;
+        const currM = parseFloat(listM[0].accountRatio);
+        const currT = parseFloat(listT[0].topTraderAccountRatio);
 
         return {
             symbol,
-            mRatio: parseFloat(m.accountRatio),
-            tRatio: parseFloat(t.topTraderAccountRatio),
+            mPos: getPositionPercent(currM, listM.map(x => x.accountRatio)),
+            tPos: getPositionPercent(currT, listT.map(x => x.topTraderAccountRatio)),
+            mRatio: currM,
+            tRatio: currT,
             funding: parseFloat(ticker.fundingRate) * 100
         };
-    } catch (err) {
-        // console.log(`Errore getData ${symbol}:`, err.message);
-        return null;
-    }
-}
-
-async function scanSymbol(symbol, messages) {
-    const data = await getData(symbol);
-    if (!data) return;
-
-    let signal = "";
-    let emoji = "";
-
-    // LOGICA DIVERGENZE / ECCEZIONI
-    if (data.tRatio >= HIGH && data.mRatio <= LOW) {
-        signal = "⚡ SQUEEZE LONG (BULLISH)";
-        emoji = "💰";
-    } else if (data.tRatio <= LOW && data.mRatio >= HIGH) {
-        signal = "⚠️ SHORT SQUEEZE (BEARISH)";
-        emoji = "🚨";
-    } else if (data.tRatio >= HIGH && data.mRatio >= HIGH) {
-        signal = "🚀 FORTE TREND LONG";
-        emoji = "📈";
-    } else if (data.tRatio <= LOW && data.mRatio <= LOW) {
-        signal = "📉 FORTE TREND SHORT";
-        emoji = "📉";
-    }
-
-    if (signal) {
-        const fundingEmoji = data.funding > 0 ? "🔴" : "🟢";
-
-        messages.push(`
-${emoji} <b>${signal}</b>
-<b>Coppia:</b> ${data.symbol}
-————————————
-🟠 Ratio Top 100: <b>${data.tRatio.toFixed(2)}</b>
-🟠 Ratio Massa:   <b>${data.mRatio.toFixed(2)}</b>
-💰 Funding:       <b>${data.funding.toFixed(4)}%</b> ${fundingEmoji}
-        `.trim());
-    }
+    } catch { return null; }
 }
 
 async function scanner() {
     try {
-        // 1. Ottieni tutti gli strumenti linear
-        const resInstruments = await axios.get(`${BASE}/v5/market/instruments-info`, {
-            params: { category: "linear" }
-        });
+        const res = await axios.get(`${BASE}/v5/market/instruments-info`, { params: { category: "linear" } });
+        const pairs = res.data.result.list.filter(p => p.quoteCoin === "USDT").map(p => p.symbol);
+        
+        console.log(`\n--- Avvio Scan (${new Date().toLocaleTimeString()}) ---`);
+        let messages = [];
 
-        // 2. Ottieni tutti i tickers in UNA sola chiamata (molto più efficiente)
-        const resTickers = await axios.get(`${BASE}/v5/market/tickers`, {
-            params: { category: "linear" }
-        });
+        for (let i = 0; i < pairs.length; i += 10) {
+            const batch = pairs.slice(i, i + 10);
+            await Promise.all(batch.map(async (s) => {
+                const data = await getSignal(s);
+                if (!data) return;
 
-        if (!resTickers.data.result?.list) {
-            throw new Error("Nessun ticker ricevuto");
-        }
+                let type = "";
+                // Utilizzo delle variabili di configurazione
+                if (data.tPos >= SOGLIA_ALTA && data.mPos <= SOGLIA_BASSA) {
+                    type = "⚡ SQUEEZE LONG (BULLISH)";
+                } else if (data.tPos <= SOGLIA_BASSA && data.mPos >= SOGLIA_ALTA) {
+                    type = "⚠️ SHORT SQUEEZE (BEARISH)";
+                } else if (data.tPos >= SOGLIA_ALTA && data.mPos >= SOGLIA_ALTA) {
+                    type = "🚀 ECCESSO LONG (TUTTI)";
+                } else if (data.tPos <= SOGLIA_BASSA && data.mPos <= SOGLIA_BASSA) {
+                    type = "📉 ECCESSO SHORT (TUTTI)";
+                }
 
-        // Mappa symbol → turnover24h (in USDT)
-        const tickerMap = new Map();
-        resTickers.data.result.list.forEach(t => {
-            tickerMap.set(t.symbol, parseFloat(t.turnover24h || 0));
-        });
-
-        // Filtra solo le coppie USDT attive con volume sufficiente
-        const pairs = resInstruments.data.result.list
-            .filter(p => 
-                p.quoteCoin === "USDT" &&
-                p.status === "Trading" &&
-                tickerMap.has(p.symbol) &&
-                tickerMap.get(p.symbol) >= MIN_VOLUME_USDT
-            )
-            .map(p => p.symbol)
-            .sort(); // ordine alfabetico per consistenza
-
-        console.log(
-            `\n--- Scan ${new Date().toLocaleString()} --- ` +
-            `(${pairs.length} coppie con vol ≥ ${MIN_VOLUME_USDT.toLocaleString()} USDT 24h)`
-        );
-
-        const messages = [];
-
-        // Elaborazione a batch per non sovraccaricare rate limit
-        for (let i = 0; i < pairs.length; i += MAX_CONCURRENT) {
-            const batch = pairs.slice(i, i + MAX_CONCURRENT);
-            await Promise.all(batch.map(symbol => scanSymbol(symbol, messages)));
-            await new Promise(r => setTimeout(r, 350)); // piccolo delay tra batch
+                if (type) {
+                    messages.push(`
+<b>${type}</b>
+<b>Coppia:</b> ${data.symbol}
+————————————
+🟡 Posizione Top 100: <b>${data.tPos.toFixed(0)}%</b>
+🟠 Posizione Massa: <b>${data.mPos.toFixed(0)}%</b>
+💰 Funding: <b>${data.funding.toFixed(4)}%</b>
+                    `.trim());
+                }
+            }));
+            await new Promise(r => setTimeout(r, 400));
         }
 
         if (messages.length > 0) {
-            const header = `<b>📊 REPORT ECCEZIONI BYBIT</b>  (${new Date().toLocaleTimeString()})\n\n`;
-            await sendTelegram(header + messages.join("\n\n————————\n\n"));
-            console.log(`✅ ${messages.length} segnali inviati su Telegram`);
+            await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                chat_id: TELEGRAM_CHAT_ID, 
+                text: `<b>📊 REPORT ECCEZIONI (Soglia ${SOGLIA_ALTA}/${SOGLIA_BASSA}%)</b>\n\n` + messages.join("\n\n——————\n\n"), 
+                parse_mode: "HTML"
+            });
+            console.log(`✅ Inviati ${messages.length} segnali.`);
         } else {
-            console.log("Nessuna eccezione rilevata oggi.");
+            console.log("Nessuna eccezione trovata con le soglie attuali.");
         }
-
-    } catch (e) {
-        console.error("Errore durante lo scan:", e.message);
-    }
+    } catch (e) { console.log("Errore:", e.message); }
 }
 
-// Avvio infinito
 (async () => {
-    console.log("🚀 Scanner Bybit Ratio + Funding + Volume Filter avviato...");
-    console.log(`Soglia minima volume 24h: ${MIN_VOLUME_USDT.toLocaleString()} USDT`);
-    console.log(`Intervallo scan: ${SCAN_INTERVAL / 60000} minuti`);
-
+    console.log("🚀 Scanner configurabile avviato...");
     while (true) {
         await scanner();
         await new Promise(r => setTimeout(r, SCAN_INTERVAL));
