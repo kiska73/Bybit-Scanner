@@ -6,8 +6,8 @@ const axios = require('axios');
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
-const SOGLIA_ALTA_BIN    = 90;
-const SOGLIA_BASSA_BIN   = 10;
+const SOGLIA_ALTA_BIN    = 9;
+const SOGLIA_BASSA_BIN   = 5;
 const WALL_DISTANCE_PCT  = 2.0;    
 
 // PERCENTUALE DI DOMINANZA: Il muro deve essere almeno il 35% di tutto il book visibile (100 livelli)
