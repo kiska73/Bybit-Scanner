@@ -6,7 +6,7 @@ const axios = require('axios');
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
-const SOGLIA_EXTREME = 90;     // ← soglia per eccesso retail (puoi alzare a 78-80 se vuoi meno segnali)
+const SOGLIA_EXTREME = 80;     // ← soglia per eccesso retail (puoi alzare a 78-80 se vuoi meno segnali)
 
 const LOOKBACK = 48;
 const MIN_VOL  = 2000000;
