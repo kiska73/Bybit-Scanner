@@ -11,7 +11,7 @@ const SOGLIA_BASSA_BIN   = 10;
 const WALL_DISTANCE_PCT  = 2.0;    
 
 // PERCENTUALE DI DOMINANZA: Il muro deve essere almeno il 35% di tutto il book visibile (100 livelli)
-const WALL_DOMINANCE_THRESHOLD = 0.35; 
+const WALL_DOMINANCE_THRESHOLD = 0.5; 
 
 const LOOKBACK           = 48;
 const MIN_VOL_24H_USDT   = 3000000; 
