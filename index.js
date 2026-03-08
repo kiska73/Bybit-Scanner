@@ -6,10 +6,10 @@ const axios = require('axios');
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
-const SOGLIA_ALTA_BIN    = 90;
-const SOGLIA_BASSA_BIN   = 10;
-const SOGLIA_BYBIT_LONG  = 80;
-const SOGLIA_BYBIT_SHORT = 20;
+const SOGLIA_ALTA_BIN    = 95;
+const SOGLIA_BASSA_BIN   = 5;
+const SOGLIA_BYBIT_LONG  = 85;
+const SOGLIA_BYBIT_SHORT = 15;
 
 const LOOKBACK           = 48;
 const MIN_VOL_24H_USDT   = 2000000;
