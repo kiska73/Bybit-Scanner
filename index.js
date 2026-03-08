@@ -12,7 +12,7 @@ const SOGLIA_BASSA = 10;
 
 const LOOKBACK = 720; // 30 giorni (24h * 30)
 const MIN_VOL_24H_USDT = 2000000;
-const SCAN_INTERVAL = 1000 * 60 * 30; // 30 min
+const SCAN_INTERVAL = 1000 * 60 * 50; // 50 min
 
 const BASE_BYBIT   = "https://api.bybit.com";
 const BASE_BINANCE = "https://fapi.binance.com";
