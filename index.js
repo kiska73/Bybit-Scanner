@@ -6,161 +6,185 @@ const axios = require('axios');
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
-const SOGLIA_EXTREME = 80;     // ← soglia per eccesso retail (puoi alzare a 78-80 se vuoi meno segnali)
-
-const LOOKBACK = 48;
-const MIN_VOL  = 2000000;
+const SOGLIA_ALTA  = 80;
+const SOGLIA_BASSA = 20;
+const LOOKBACK     = 48;
+const MIN_VOL_2M   = 2000000;
 
 const SCAN_INTERVAL = 1000 * 60 * 30; // 30 minuti
-const BATCH_SIZE    = 20;             // più veloce
-const BATCH_SLEEP   = 80;
-// ==========================================
 
-const BASE = "https://api.bybit.com";
+const BASE_BYBIT   = "https://api.bybit.com";
+const BASE_BINANCE = "https://fapi.binance.com";
+// ==========================================
 
 let PAIRS = [];
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function getPosition(current, history) {
+    const values = history.map(v => parseFloat(v));
+    const max = Math.max(...values);
+    const min = Math.min(...values);
+    if (max === min) return 50;
+    return ((current - min) / (max - min)) * 100;
+}
 
 // ==========================================
-// ANALISI SINGOLA COIN (SOLO RETAIL - TOP TRADER RIMOSSO)
+// Bybit Retail Ratio (buy/sell account ratio)
 // ==========================================
-async function getSignal(symbol, tickerMap) {
+async function getBybitRetail(symbol, tickerMap) {
     try {
-        const resM = await axios.get(`${BASE}/v5/market/account-ratio`, {
+        const res = await axios.get(`${BASE_BYBIT}/v5/market/account-ratio`, {
             params: { category: 'linear', symbol, period: '1h', limit: LOOKBACK },
-            timeout: 5000
+            timeout: 6000
         });
 
-        const ticker = tickerMap.get(symbol);
-        if (!ticker) return null;
+        const list = res.data?.result?.list || [];
+        if (list.length < 1) return null;
 
-        const mData = resM.data?.result?.list || [];
-        if (mData.length === 0) return null;
+        const buyHistory = list.map(x => parseFloat(x.buyRatio || 0));
+        const currentBuy = buyHistory[0] * 100; // in %
 
-        const vol24h = parseFloat(ticker.turnover24h);
-        if (vol24h < MIN_VOL) return null;
-
-        const ultimo = mData[0];
-        const buyRatio  = parseFloat(ultimo.buyRatio  || 0);
-        const sellRatio = parseFloat(ultimo.sellRatio || 0);
-
-        return {
-            symbol,
-            price: parseFloat(ticker.lastPrice),
-            fund: parseFloat(ticker.fundingRate) * 100,
-            vol24h,
-            buyRatio,
-            sellRatio
-        };
-
+        return { bybitBuyPos: getPosition(currentBuy, buyHistory), bybitBuy: currentBuy };
     } catch (err) {
-        if (err.response?.status === 404) return null;
-        console.log(`⚠️ ${symbol} errore`);
+        if (err.response?.status !== 404) console.log(`Bybit retail err ${symbol}: ${err.message}`);
         return null;
     }
 }
 
 // ==========================================
-// SCAN MERCATO
+// Binance Holder (global account) + Top Trader
+// ==========================================
+async function getBinanceRatios(symbol) {
+    try {
+        const [resHolder, resTop] = await Promise.all([
+            axios.get(`${BASE_BINANCE}/futures/data/globalLongShortAccountRatio`, {
+                params: { symbol, period: '1h', limit: LOOKBACK },
+                timeout: 6000
+            }),
+            axios.get(`${BASE_BINANCE}/futures/data/topLongShortAccountRatio`, {
+                params: { symbol, period: '1h', limit: LOOKBACK },
+                timeout: 6000
+            })
+        ]);
+
+        const holder = resHolder.data || [];
+        const top    = resTop.data    || [];
+
+        if (holder.length < 1 || top.length < 1) return null;
+
+        const holderLongHist = holder.map(x => parseFloat(x.longAccount) * 100);
+        const topLongHist    = top.map(x => parseFloat(x.longAccount) * 100);
+
+        const holderLong = holderLongHist[0];
+        const topLong    = topLongHist[0];
+
+        const price = parseFloat(holder[0]?.price || tickerMap.get(symbol)?.lastPrice || 0);
+
+        return {
+            holderPos: getPosition(holderLong, holderLongHist),
+            topPos:    getPosition(topLong,    topLongHist),
+            holderLong,
+            topLong,
+            price
+        };
+    } catch (err) {
+        console.log(`Binance err ${symbol}: ${err.message}`);
+        return null;
+    }
+}
+
+// ==========================================
+// SCAN PRINCIPALE
 // ==========================================
 async function scan() {
-    const startTime = Date.now();
-    console.log(`\n🚀 [${new Date().toLocaleTimeString()}] INIZIO SCAN - ${PAIRS.length} coppie`);
+    console.log(`\n--- [${new Date().toLocaleTimeString()}] Scan Bybit+Binance ---`);
 
-    const resTick = await axios.get(`${BASE}/v5/market/tickers`, {
-        params: { category: 'linear' },
-        timeout: 8000
-    });
-
-    const tickerMap = new Map(resTick.data.result.list.map(t => [t.symbol, t]));
+    // Tickers Bybit per volume + funding + price fallback
+    const tickRes = await axios.get(`${BASE_BYBIT}/v5/market/tickers`, { params: { category: 'linear' }, timeout: 10000 });
+    const tickerMap = new Map(tickRes.data.result.list.map(t => [t.symbol, t]));
 
     const highVolPairs = PAIRS.filter(s => {
         const t = tickerMap.get(s);
-        return t && parseFloat(t.turnover24h || 0) >= MIN_VOL;
+        return t && parseFloat(t.turnover24h || 0) >= MIN_VOL_2M;
     });
 
-    console.log(`📈 ${highVolPairs.length} coppie con volume ≥ 2M USDT\n`);
+    console.log(`High vol pairs: ${highVolPairs.length}`);
 
     let messages = [];
 
-    for (let i = 0; i < highVolPairs.length; i += BATCH_SIZE) {
-        const batch = highVolPairs.slice(i, i + BATCH_SIZE);
-        const results = await Promise.all(batch.map(s => getSignal(s, tickerMap)));
+    for (let i = 0; i < highVolPairs.length; i += 8) {  // batch piccolo per Binance
+        const batch = highVolPairs.slice(i, i + 8);
 
-        for (const data of results) {
-            if (!data) continue;
+        await Promise.all(batch.map(async symbol => {
+            const binance = await getBinanceRatios(symbol);
+            if (!binance) return;
 
-            const { buyRatio, sellRatio } = data;
+            const { holderPos, topPos, holderLong, topLong, price } = binance;
 
-            console.log(
-                `${data.symbol.padEnd(12)} | ` +
-                `Retail BUY: ${(buyRatio*100).toFixed(1)}% | ` +
-                `SELL: ${(sellRatio*100).toFixed(1)}% | ` +
-                `Vol: ${(data.vol24h/1e6).toFixed(1)}M`
-            );
+            const ticker = tickerMap.get(symbol);
+            const fund = ticker ? (parseFloat(ticker.fundingRate) * 100).toFixed(4) : 'N/A';
 
             let type = "";
-            if (buyRatio >= SOGLIA_EXTREME / 100) {
-                type = "🚀 RETAIL EXTREME LONG (eccesso di long)";
-            } else if (sellRatio >= SOGLIA_EXTREME / 100) {
-                type = "⚠️ RETAIL EXTREME SHORT (eccesso di short)";
+            if (holderPos >= SOGLIA_ALTA && topPos >= SOGLIA_ALTA) {
+                type = "2 alti long forte";
+            } else if (holderPos <= SOGLIA_BASSA && topPos <= SOGLIA_BASSA) {
+                type = "2 bassi short forte";
+            } else if (
+                (holderPos >= SOGLIA_ALTA && topPos <= SOGLIA_BASSA) ||
+                (holderPos <= SOGLIA_BASSA && topPos >= SOGLIA_ALTA)
+            ) {
+                type = "SQUEEZE possibile (divergenza)";
             }
 
             if (type) {
                 messages.push(`
-<b>${type}</b>
-<b>Coppia:</b> ${data.symbol}
-<b>Prezzo:</b> ${data.price}
+<b>${type.toUpperCase()}</b>
+<b>${symbol}</b> @ ${price.toFixed(2)}
 
-🟠 Retail BUY: <b>${(buyRatio*100).toFixed(1)}%</b>
-🟠 Retail SELL: <b>${(sellRatio*100).toFixed(1)}%</b>
-
-💰 Funding: <b>${data.fund.toFixed(4)}%</b>
-📊 Volume: <b>$${(data.vol24h / 1e6).toFixed(2)}M</b>
+Holder Binance: <b>${holderLong.toFixed(0)}%</b> long
+Top Binance: <b>${topLong.toFixed(0)}%</b> long
+Funding: <b>${fund}%</b> ${parseFloat(fund) > 0 ? '🔴' : '🟢'}
                 `.trim());
             }
-        }
+        }));
 
-        await sleep(BATCH_SLEEP);
+        await sleep(300); // respiro per Binance rate limit
     }
 
-    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`\n✅ SCAN COMPLETATO in ${duration}s | Segnali trovati: ${messages.length}`);
-
     if (messages.length > 0) {
-        for (let i = 0; i < messages.length; i += 5) {
-            const chunk = messages.slice(i, i + 5).join("\n\n——————\n\n");
+        for (let j = 0; j < messages.length; j += 4) {
+            const chunk = messages.slice(j, j + 4).join("\n\n——————\n\n");
             await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
                 chat_id: TELEGRAM_CHAT_ID,
-                text: `<b>📊 REPORT RETAIL RATIO</b>\n\n${chunk}`,
+                text: `<b>📊 RATIO ALERT (Binance + Bybit retail)</b>\n\n${chunk}`,
                 parse_mode: "HTML"
-            });
+            }).catch(e => console.log("Telegram err:", e.message));
         }
-        console.log(`📤 ${messages.length} segnali inviati su Telegram`);
+        console.log(`✅ ${messages.length} segnali inviati`);
     } else {
-        console.log(`😶 Nessun eccesso retail estremo questa volta`);
+        console.log("Nessun segnale estremo");
     }
 }
 
 // ==========================================
 // AVVIO
 // ==========================================
-async function startBot() {
-    console.log("🚀 Radar Blindato (solo Retail) avviato...");
+async function init() {
+    console.log("🚀 Radar Bybit+Binance avviato...");
+    try {
+        const res = await axios.get(`${BASE_BYBIT}/v5/market/instruments-info`, { params: { category: "linear" } });
+        PAIRS = res.data.result.list
+            .filter(p => p.quoteCoin === "USDT" && p.contractType === "LinearPerpetual" && p.status === "Trading")
+            .map(p => p.symbol);
 
-    const res = await axios.get(`${BASE}/v5/market/instruments-info`, {
-        params: { category: "linear" }
-    });
-
-    PAIRS = res.data.result.list
-        .filter(p => p.quoteCoin === "USDT" && p.contractType === "LinearPerpetual" && p.status === "Trading")
-        .map(p => p.symbol);
-
-    console.log(`✅ Caricate ${PAIRS.length} coppie USDT Perpetual\n`);
+        console.log(`Caricate ${PAIRS.length} coppie USDT perp`);
+    } catch (e) {
+        console.error("Errore init pairs:", e.message);
+    }
 
     await scan();
     setInterval(scan, SCAN_INTERVAL);
 }
 
-startBot();
+init().catch(console.error);
