@@ -6,18 +6,20 @@ const axios = require('axios');
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
-const SOGLIA_ALTA  = 60;  // Abbassata per più segnali
-const SOGLIA_BASSA = 40;
+const SOGLIA_ALTA  = 80;
+const SOGLIA_BASSA = 20;
 
 const LOOKBACK = 48;
 const MIN_VOL  = 2000000;
 
 const SCAN_INTERVAL = 1000 * 60 * 30; // 30 minuti
+const BATCH_SIZE    = 15;
+const BATCH_SLEEP   = 100;
 // ==========================================
 
 const BASE = "https://api.bybit.com";
 
-let PAIRS_WITH_RATIO = [];
+let PAIRS = [];
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -30,36 +32,11 @@ function getPosition(current, history) {
 }
 
 // ==========================================
-// TROVA COPPIE CON RATIO DISPONIBILE
+// ANALISI SINGOLA COIN (senza più controllo volume)
 // ==========================================
-async function getPairsWithRatio(allPairs) {
-    console.log("🔎 Ricerca coppie con ratio disponibile...");
-    let supported = [];
-    for (let i = 0; i < allPairs.length; i++) {
-        const symbol = allPairs[i];
-        try {
-            await axios.get(`${BASE}/v5/market/account-ratio`, {
-                params: { category: 'linear', symbol, period: '1h', limit: 1 },
-                timeout: 4000
-            });
-            supported.push(symbol);
-        } catch (err) {
-            if (err.response && err.response.status !== 404) {
-                console.log(`Errore su ${symbol}`);
-            }
-        }
-        await sleep(80); // evita rate limit
-    }
-    console.log(`✅ Coppie con ratio disponibile: ${supported.length}`);
-    return supported;
-}
-
-// ==========================================
-// ANALISI SINGOLA COIN
-// ==========================================
-async function getSignal(symbol) {
+async function getSignal(symbol, tickerMap) {
     try {
-        const [resM, resT, resTick] = await Promise.all([
+        const [resM, resT] = await Promise.all([
             axios.get(`${BASE}/v5/market/account-ratio`, {
                 params: { category: 'linear', symbol, period: '1h', limit: LOOKBACK },
                 timeout: 5000
@@ -67,18 +44,11 @@ async function getSignal(symbol) {
             axios.get(`${BASE}/v5/market/top-trader-account-ratio`, {
                 params: { category: 'linear', symbol, period: '1h', limit: LOOKBACK },
                 timeout: 5000
-            }),
-            axios.get(`${BASE}/v5/market/tickers`, {
-                params: { category: 'linear', symbol },
-                timeout: 5000
             })
         ]);
 
-        const ticker = resTick.data.result?.list?.[0];
+        const ticker = tickerMap.get(symbol);
         if (!ticker) return null;
-
-        const vol24h = parseFloat(ticker.turnover24h);
-        if (vol24h < MIN_VOL) return null;
 
         const mData = resM.data.result?.list;
         const tData = resT.data.result?.list;
@@ -86,6 +56,7 @@ async function getSignal(symbol) {
 
         const currentM = parseFloat(mData[0].accountRatio);
         const currentT = parseFloat(tData[0].topTraderAccountRatio);
+        const vol24h = parseFloat(ticker.turnover24h);
 
         return {
             symbol,
@@ -99,29 +70,53 @@ async function getSignal(symbol) {
         };
 
     } catch (err) {
-        if (err.response && err.response.status === 404) return null;
-        console.log(`⚠️ ${symbol} errore`);
+        if (err.response?.status === 404) return null;
+        console.log(`⚠️ ${symbol} errore API`);
         return null;
     }
 }
 
 // ==========================================
-// SCAN MERCATO
+// SCAN MERCATO (con log dettagliati)
 // ==========================================
 async function scan() {
-    console.log(`\n--- [${new Date().toLocaleTimeString()}] Analisi ${PAIRS_WITH_RATIO.length} coppie ---`);
+    const startTime = Date.now();
+    console.log(`\n🚀 [${new Date().toLocaleTimeString()}] INIZIO SCAN - ${PAIRS.length} coppie totali`);
+
+    // 1. Tutti i ticker in UNA chiamata
+    const resTick = await axios.get(`${BASE}/v5/market/tickers`, {
+        params: { category: 'linear' },
+        timeout: 8000
+    });
+
+    const tickerMap = new Map(resTick.data.result.list.map(t => [t.symbol, t]));
+
+    // 2. Filtra solo le coppie con volume sufficiente
+    const highVolPairs = PAIRS.filter(symbol => {
+        const ticker = tickerMap.get(symbol);
+        return ticker && parseFloat(ticker.turnover24h || 0) >= MIN_VOL;
+    });
+
+    const skipped = PAIRS.length - highVolPairs.length;
+    console.log(`📈 ${highVolPairs.length} coppie con volume > 2M USDT`);
+    console.log(`⏭️  ${skipped} coppie skippate per volume troppo basso\n`);
+
     let messages = [];
 
-    for (let i = 0; i < PAIRS_WITH_RATIO.length; i += 5) {
-        const batch = PAIRS_WITH_RATIO.slice(i, i + 5);
-        const results = await Promise.all(batch.map(s => getSignal(s)));
+    // 3. Analisi a batch
+    for (let i = 0; i < highVolPairs.length; i += BATCH_SIZE) {
+        const batch = highVolPairs.slice(i, i + BATCH_SIZE);
+        const results = await Promise.all(batch.map(s => getSignal(s, tickerMap)));
 
         for (const data of results) {
             if (!data) continue;
 
-            // 🔹 log per debug e leggibilità
+            // LOG DETTAGLIATO - ecco cosa trovi!
             console.log(
-                `${data.symbol} | Top: ${data.posT.toFixed(0)}% | Retail: ${data.posM.toFixed(0)}% | Vol: ${(data.vol24h/1000000).toFixed(1)}M`
+                `${data.symbol.padEnd(12)} | ` +
+                `Top: ${data.posT.toFixed(0)}% (${data.currentT.toFixed(3)}) | ` +
+                `Retail: ${data.posM.toFixed(0)}% (${data.currentM.toFixed(3)}) | ` +
+                `Vol: ${(data.vol24h/1000000).toFixed(1)}M`
             );
 
             let type = "";
@@ -136,8 +131,8 @@ async function scan() {
 <b>Coppia:</b> ${data.symbol}
 <b>Prezzo:</b> ${data.price}
 
-🟡 Top Trader: <b>${data.posT.toFixed(0)}%</b>
-🟠 Retail: <b>${data.posM.toFixed(0)}%</b>
+🟡 Top Trader: <b>${data.posT.toFixed(0)}%</b> (${data.currentT.toFixed(3)})
+🟠 Retail: <b>${data.posM.toFixed(0)}%</b> (${data.currentM.toFixed(3)})
 
 💰 Funding: <b>${data.fund.toFixed(4)}%</b>
 📊 Volume: <b>$${(data.vol24h / 1000000).toFixed(2)}M</b>
@@ -145,11 +140,13 @@ async function scan() {
             }
         }
 
-        await sleep(200);
+        await sleep(BATCH_SLEEP);
     }
 
-    console.log(`Segnali trovati: ${messages.length}`);
+    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`\n✅ SCAN COMPLETATO in ${duration}s | Analizzate: ${highVolPairs.length} | Segnali: ${messages.length}`);
 
+    // Invio Telegram
     if (messages.length > 0) {
         for (let i = 0; i < messages.length; i += 5) {
             const chunk = messages.slice(i, i + 5).join("\n\n——————\n\n");
@@ -159,12 +156,14 @@ async function scan() {
                 parse_mode: "HTML"
             });
         }
-        console.log(`✅ ${messages.length} segnali inviati`);
+        console.log(`📤 ${messages.length} segnali inviati su Telegram`);
+    } else {
+        console.log(`😶 Nessun segnale questa volta`);
     }
 }
 
 // ==========================================
-// AVVIO BOT
+// AVVIO
 // ==========================================
 async function startBot() {
     console.log("🚀 Radar Blindato avviato...");
@@ -173,22 +172,13 @@ async function startBot() {
         params: { category: "linear" }
     });
 
-    const allPairs = res.data.result.list
-        .filter(p =>
-            p.quoteCoin === "USDT" &&
-            p.contractType === "LinearPerpetual" &&
-            p.status === "Trading"
-        )
+    PAIRS = res.data.result.list
+        .filter(p => p.quoteCoin === "USDT" && p.contractType === "LinearPerpetual" && p.status === "Trading")
         .map(p => p.symbol);
 
-    console.log(`Totale coppie USDT perpetual: ${allPairs.length}`);
-
-    PAIRS_WITH_RATIO = await getPairsWithRatio(allPairs);
-
-    console.log(`Scanner attivo su ${PAIRS_WITH_RATIO.length} coppie`);
+    console.log(`✅ Caricate ${PAIRS.length} coppie USDT Perpetual\n`);
 
     await scan();
-
     setInterval(scan, SCAN_INTERVAL);
 }
 
