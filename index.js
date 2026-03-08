@@ -6,38 +6,66 @@ const axios = require('axios');
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
-const SOGLIA_ALTA_BIN    = 95;
-const SOGLIA_BASSA_BIN   = 5;
+const SOGLIA_ALTA_BIN    = 90;
+const SOGLIA_BASSA_BIN   = 10;
 const SOGLIA_BYBIT_LONG  = 80;
 const SOGLIA_BYBIT_SHORT = 20;
 
-const LOOKBACK          = 48;           // ore
-const MIN_VOL_24H_USDT  = 2000000;      // volume minimo 24h in USDT
-const SCAN_INTERVAL     = 1000 * 60 * 30; // 30 minuti
+const LOOKBACK           = 48;
+const MIN_VOL_24H_USDT   = 2000000;
+const SCAN_INTERVAL      = 1000 * 60 * 30; // 30 min
 
-const CONCURRENCY_LIMIT = 6;            // prudente per evitare ban rate-limit
-const REQUEST_TIMEOUT   = 8000;
+const CONCURRENCY_LIMIT  = 4;
+const REQUEST_TIMEOUT    = 12000;
 
 const BASE_BYBIT   = "https://api.bybit.com";
 const BASE_BINANCE = "https://fapi.binance.com";
 
 let PAIRS = [];
+let BINANCE_SYMBOLS = new Set();
 let isScanning = false;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ==========================================
-// FUNZIONI DI CALCOLO
+// FUNZIONI HELPER
 // ==========================================
 
 function getRelativePosition(current, history) {
     const values = history.map(v => parseFloat(v)).filter(v => !isNaN(v));
-    if (values.length === 0) return 50;
-    const min = Math.min(...values);
-    const max = Math.max(...values);
+    if (values.length < 2) return 50;
+
+    let min = Infinity, max = -Infinity;
+    for (const v of values) {
+        if (v < min) min = v;
+        if (v > max) max = v;
+    }
     if (max === min) return 50;
     return Math.max(0, Math.min(100, ((current - min) / (max - min)) * 100));
 }
+
+// ==========================================
+// CARICAMENTO SIMBOLI BINANCE (con refresh periodico)
+// ==========================================
+
+async function loadBinanceSymbols() {
+    try {
+        const binInfo = await axios.get(`${BASE_BINANCE}/fapi/v1/exchangeInfo`, { timeout: 15000 });
+        const newSymbols = new Set(
+            binInfo.data.symbols
+                .filter(s => s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT')
+                .map(s => s.symbol)
+        );
+        BINANCE_SYMBOLS = newSymbols;
+        console.log(`Cache Binance aggiornata: ${BINANCE_SYMBOLS.size} perpetual USDT`);
+    } catch (err) {
+        console.warn("Errore refresh cache Binance:", err.message);
+    }
+}
+
+// ==========================================
+// FETCH DATI SENTIMENT
+// ==========================================
 
 async function fetchSentimentData(symbol, tickerMap) {
     try {
@@ -60,35 +88,52 @@ async function fetchSentimentData(symbol, tickerMap) {
         const binHolder = binHolderRes.data || [];
         const binTop    = binTopRes.data || [];
 
-        if (bybitList.length < 5 || binHolder.length < 5 || binTop.length < 5) {
-            return null;
-        }
+        if (bybitList.length < 5 || binHolder.length < 5 || binTop.length < 5) return null;
 
-        // Bybit → ultimo valore (più recente)
         const latestBybit = bybitList[bybitList.length - 1];
-        const bybitLongPct = parseFloat(latestBybit.longRatio || 0) * 100;
+        const rawBybitRatio = parseFloat(latestBybit.buyRatio || 0);
+        const bybitLongPct  = (rawBybitRatio * 100).toFixed(1);
 
-        // Binance → ultimo valore = più recente
         const binHolderLongs = binHolder.map(x => parseFloat(x.longAccount || 0));
         const binTopLongs    = binTop.map(x => parseFloat(x.longAccount || 0));
 
         const currentBinHolder = binHolderLongs[binHolderLongs.length - 1] || 0;
-        const currentBinTop    = binTopLongs[binTopLongs.length - 1]    || 0;
+        const currentBinTop    = binTopLongs[binTopLongs.length - 1] || 0;
+
+        const binHolderPos = getRelativePosition(currentBinHolder, binHolderLongs);
+        const binTopPos    = getRelativePosition(currentBinTop, binTopLongs);
+
+        const binHolderVal = (currentBinHolder * 100).toFixed(1);
+        const binTopVal    = (currentBinTop * 100).toFixed(1);
 
         const ticker = tickerMap.get(symbol);
+        const fundingVal = ticker ? (parseFloat(ticker.fundingRate || 0) * 100).toFixed(4) : '0.0000';
+
+        // ────────────────────────────────────────────────
+        // CALCOLO SCORE per ordinamento segnali (più alto = più rilevante)
+        // ────────────────────────────────────────────────
+        const divBybitWhales     = Math.abs(parseFloat(bybitLongPct) - parseFloat(binTopVal));
+        const divRetailWhales    = Math.abs(binHolderPos - binTopPos);          // aggiunta importante
+        const extremism          = Math.max(binHolderPos, 100 - binHolderPos, binTopPos, 100 - binTopPos);
+        const fundingBonus       =
+            (parseFloat(fundingVal) > 0.01 && parseFloat(bybitLongPct) > 70) ? 30 :
+            (parseFloat(fundingVal) < -0.01 && parseFloat(bybitLongPct) < 30) ? 30 : 0;
+
+        const score = divBybitWhales + divRetailWhales + extremism + fundingBonus;
+        // ────────────────────────────────────────────────
 
         return {
             symbol,
-            binHolderPos: getRelativePosition(currentBinHolder, binHolderLongs),
-            binTopPos:    getRelativePosition(currentBinTop,    binTopLongs),
-            binHolderVal: (currentBinHolder * 100).toFixed(1),
-            binTopVal:    (currentBinTop    * 100).toFixed(1),
-            bybitVal:     bybitLongPct.toFixed(1),
-            funding:      ticker ? (parseFloat(ticker.fundingRate || 0) * 100).toFixed(4) : '0.0000',
-            price:        ticker ? parseFloat(ticker.lastPrice || 0) : 0
+            binHolderPos,
+            binTopPos,
+            binHolderVal,
+            binTopVal,
+            bybitVal: bybitLongPct,
+            funding: fundingVal,
+            price: ticker ? parseFloat(ticker.lastPrice || 0) : 0,
+            score
         };
     } catch (err) {
-        console.log(`Errore fetch ${symbol}: ${err.message}`);
         return null;
     }
 }
@@ -98,117 +143,97 @@ async function fetchSentimentData(symbol, tickerMap) {
 // ==========================================
 
 async function scan() {
-    if (isScanning) {
-        console.log("Scan già in corso → salto");
-        return;
-    }
-
+    if (isScanning) return;
     isScanning = true;
     const start = Date.now();
 
     try {
-        // 1. Ottieni tutti i ticker per volume e prezzo
         const tickersRes = await axios.get(`${BASE_BYBIT}/v5/market/tickers`, {
             params: { category: 'linear' },
-            timeout: 12000
+            timeout: 20000
         });
 
         const tickerMap = new Map(tickersRes.data.result.list.map(t => [t.symbol, t]));
 
-        // 2. Filtra solo coppie attive con volume decente
         const candidates = PAIRS.filter(s => {
             const t = tickerMap.get(s);
-            return t && parseFloat(t.turnover24h || 0) >= MIN_VOL_24H_USDT;
+            if (!t) return false;
+            if (parseFloat(t.turnover24h || 0) < MIN_VOL_24H_USDT) return false;
+            if (BINANCE_SYMBOLS.size > 0 && !BINANCE_SYMBOLS.has(s)) return false;
+            return true;
         });
 
-        console.log(`Scan avviato — ${candidates.length} coppie qualificate`);
+        console.log(`Scan → ${candidates.length} coppie qualificate`);
 
         let signals = [];
 
-        // Processa a batch per non ammazzare rate-limit
         for (let i = 0; i < candidates.length; i += CONCURRENCY_LIMIT) {
             const batch = candidates.slice(i, i + CONCURRENCY_LIMIT);
-            const results = await Promise.all(
-                batch.map(s => fetchSentimentData(s, tickerMap))
-            );
+            const results = await Promise.all(batch.map(s => fetchSentimentData(s, tickerMap)));
 
             for (const res of results) {
                 if (!res) continue;
+                if (parseFloat(res.bybitVal) < 5) continue;
 
-                let title = "";
-                let emoji = "";
-                let subtitle = "";
+                let title = "", emoji = "", subtitle = "";
 
-                if (res.binHolderPos >= SOGLIA_ALTA_BIN &&
-                    res.binTopPos    <= SOGLIA_BASSA_BIN &&
-                    res.bybitVal     >= SOGLIA_BYBIT_LONG) {
-                    title    = "LONG – SQUEEZE DIVERGENZA";
-                    emoji    = "🚀⚡";
-                    subtitle = "Top corti vs Retail long estremi";
-                }
-                else if (res.binHolderPos <= SOGLIA_BASSA_BIN &&
-                         res.binTopPos    >= SOGLIA_ALTA_BIN &&
-                         res.bybitVal     <= SOGLIA_BYBIT_SHORT) {
-                    title    = "SHORT – SQUEEZE DIVERGENZA";
-                    emoji    = "📉⚠️";
-                    subtitle = "Top long vs Retail short estremi";
-                }
-                else if (res.binHolderPos >= SOGLIA_ALTA_BIN &&
-                         res.binTopPos    >= SOGLIA_ALTA_BIN &&
-                         res.bybitVal     >= SOGLIA_BYBIT_LONG) {
-                    title    = "LONG – OVERCROWDED";
-                    emoji    = "🚀🔥";
-                    subtitle = "Tutti estremi long";
-                }
-                else if (res.binHolderPos <= SOGLIA_BASSA_BIN &&
-                         res.binTopPos    <= SOGLIA_BASSA_BIN &&
-                         res.bybitVal     <= SOGLIA_BYBIT_SHORT) {
-                    title    = "SHORT – OVERCROWDED";
-                    emoji    = "📉❄️";
-                    subtitle = "Tutti estremi short";
+                if (res.binHolderPos >= SOGLIA_ALTA_BIN && res.binTopPos <= SOGLIA_BASSA_BIN && parseFloat(res.bybitVal) >= SOGLIA_BYBIT_LONG) {
+                    title = "LONG – SQUEEZE DIVERGENZA";
+                    emoji = "🚀⚡";
+                    subtitle = "Whales SHORT vs Retail LONG estremi";
+                } else if (res.binHolderPos <= SOGLIA_BASSA_BIN && res.binTopPos >= SOGLIA_ALTA_BIN && parseFloat(res.bybitVal) <= SOGLIA_BYBIT_SHORT) {
+                    title = "SHORT – SQUEEZE DIVERGENZA";
+                    emoji = "📉⚠️";
+                    subtitle = "Whales LONG vs Retail SHORT estremi";
+                } else if (res.binHolderPos >= SOGLIA_ALTA_BIN && res.binTopPos >= SOGLIA_ALTA_BIN && parseFloat(res.bybitVal) >= SOGLIA_BYBIT_LONG) {
+                    title = "LONG – OVERCROWDED";
+                    emoji = "🚀🔥";
+                    subtitle = "Sentiment unanime Long";
+                } else if (res.binHolderPos <= SOGLIA_BASSA_BIN && res.binTopPos <= SOGLIA_BASSA_BIN && parseFloat(res.bybitVal) <= SOGLIA_BYBIT_SHORT) {
+                    title = "SHORT – OVERCROWDED";
+                    emoji = "📉❄️";
+                    subtitle = "Sentiment unanime Short";
                 }
 
                 if (title) {
-                    const priceStr = res.price
-                        ? res.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
-                        : "—";
-
                     const fundingSign = parseFloat(res.funding) > 0 ? '🔴 longs pagano' : '🟢 shorts pagano';
 
-                    signals.push(`
+                    signals.push({
+                        text: `
 <b>${emoji} ${title}</b>
-#${res.symbol}  @ ${priceStr}
+#${res.symbol} @ ${res.price.toFixed(4)}
 ${subtitle}
 
-Bin Holder: <b>${res.binHolderVal}%</b>   Top: <b>${res.binTopVal}%</b>
-Bybit retail: <b>${res.bybitVal}%</b>
+Bin Retail: <b>${res.binHolderVal}%</b> (Pos ${res.binHolderPos.toFixed(0)}%)
+Bin Top: <b>${res.binTopVal}%</b> (Pos ${res.binTopPos.toFixed(0)}%)
+Bybit Retail: <b>${res.bybitVal}%</b>
 Funding: <b>${res.funding}%</b> ${fundingSign}
-                    `.trim());
+                        `.trim(),
+                        score: res.score
+                    });
                 }
             }
-
-            await sleep(350); // micro-pausa tra batch
+            await sleep(600);
         }
 
-        // Invio Telegram se ci sono segnali
-        if (signals.length > 0) {
-            console.log(`Trovati ${signals.length} segnali`);
+        // ORDINA per score decrescente
+        signals.sort((a, b) => b.score - a.score);
 
-            for (let j = 0; j < signals.length; j += 4) {
-                const chunk = signals.slice(j, j + 4).join("\n\n———\n\n");
+        if (signals.length > 0) {
+            const texts = signals.map(s => s.text);
+            for (let j = 0; j < texts.length; j += 3) {
+                const chunk = texts.slice(j, j + 3).join("\n\n———\n\n");
                 await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
                     chat_id: TELEGRAM_CHAT_ID,
-                    text: `<b>📊 SENTIMENT ALERT  ${new Date().toLocaleTimeString('it-IT')}</b>\n\n${chunk}`,
+                    text: `<b>📊 SENTIMENT ALERT ${new Date().toLocaleTimeString('it-IT')}</b>\n\n${chunk}`,
                     parse_mode: "HTML"
-                }, { timeout: 10000 }).catch(e => console.log("Telegram fallito:", e.message));
+                }, { timeout: 10000 }).catch(() => {});
             }
         }
 
-        const duration = ((Date.now() - start) / 1000).toFixed(1);
-        console.log(`Scan terminato in ${duration}s — segnali: ${signals.length}`);
-
+        console.log(`Scan completato (${((Date.now() - start)/1000).toFixed(1)}s) — segnali: ${signals.length}`);
     } catch (err) {
-        console.error("Errore scan principale:", err.message);
+        console.error("Errore scan:", err.message);
     } finally {
         isScanning = false;
     }
@@ -220,22 +245,28 @@ Funding: <b>${res.funding}%</b> ${fundingSign}
 
 async function initialize() {
     try {
+        // Carica coppie Bybit
         const res = await axios.get(`${BASE_BYBIT}/v5/market/instruments-info`, {
             params: { category: "linear" },
-            timeout: 15000
+            timeout: 20000
         });
 
         PAIRS = res.data.result.list
             .filter(p => p.quoteCoin === "USDT" && p.status === "Trading")
             .map(p => p.symbol);
 
-        console.log(`Inizializzato — ${PAIRS.length} coppie lineari USDT`);
+        console.log(`Caricate ${PAIRS.length} coppie USDT`);
 
-        await scan();                    // primo scan immediato
-        setInterval(scan, SCAN_INTERVAL); // poi ciclico
+        // Carica cache Binance subito
+        await loadBinanceSymbols();
 
+        // Refresh cache Binance ogni 12 ore
+        setInterval(loadBinanceSymbols, 1000 * 60 * 60 * 12);
+
+        await scan();
+        setInterval(scan, SCAN_INTERVAL);
     } catch (err) {
-        console.error("Fallita inizializzazione:", err.message);
+        console.error("Inizializzazione fallita:", err.message);
     }
 }
 
