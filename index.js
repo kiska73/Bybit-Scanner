@@ -7,9 +7,9 @@ const BASE = "https://api.bybit.com";
 const SCAN_INTERVAL = 1000 * 60 * 30; // 30 min
 const MAX_CONCURRENT = 10; 
 
-// SOGLIE RICHIESTE
-const HIGH = 0.80; 
-const LOW  = 0.20; 
+// SOGLIE ECCEZIONI (Valori esatti linea arancione)
+const HIGH = 3.0; 
+const LOW  = 0.5; 
 
 async function sendTelegram(msg) {
     try {
@@ -19,88 +19,98 @@ async function sendTelegram(msg) {
     } catch (err) { console.log("❌ Errore Telegram"); }
 }
 
-async function getSentiment(symbol) {
+async function getData(symbol) {
     try {
-        // 1. DATO MASSA (Indicatore arancione Foto 1000011760)
+        // 1. Ratio Massa (Account Ratio)
         const resMassa = await axios.get(`${BASE}/v5/market/account-ratio`, {
-            params: { category: "linear", symbol, period: "1h", limit: 1 }
+            params: { category: 'linear', symbol, period: '1h', limit: 1 }
         });
-        
-        // 2. DATO TOP 100 (Indicatore arancione Foto 1000011761)
+        // 2. Ratio Top 100 (Top Trader Ratio)
         const resTop = await axios.get(`${BASE}/v5/market/top-trader-account-ratio`, {
-            params: { category: "linear", symbol, period: "1h", limit: 1 }
+            params: { category: 'linear', symbol, period: '1h', limit: 1 }
+        });
+        // 3. Ticker per Funding Rate
+        const resTicker = await axios.get(`${BASE}/v5/market/tickers`, {
+            params: { category: 'linear', symbol }
         });
 
-        const massa = resMassa.data.result.list?.[0];
-        const top = resTop.data.result.list?.[0];
+        const m = resMassa.data.result.list?.[0];
+        const t = resTop.data.result.list?.[0];
+        const ticker = resTicker.data.result.list?.[0];
 
-        if (!massa || !top) return null;
+        if (!m || !t || !ticker) return null;
 
         return {
-            massaLong: parseFloat(massa.buyRatio), // Es. 0.82
-            topLong: parseFloat(top.buyRatio)      // Es. 0.15
+            symbol,
+            mRatio: parseFloat(m.accountRatio),
+            tRatio: parseFloat(t.topTraderAccountRatio),
+            funding: parseFloat(ticker.fundingRate) * 100
         };
     } catch { return null; }
 }
 
 async function scanSymbol(symbol, messages) {
-    const data = await getSentiment(symbol);
+    const data = await getData(symbol);
     if (!data) return;
 
-    let type = "";
-    let desc = "";
+    let signal = "";
+    let emoji = "";
 
-    // LOGICA RICHIESTA
-    if (data.topLong > HIGH && data.massaLong > HIGH) {
-        type = "🚀 FORTE TREND LONG";
-        desc = "Sentiment unanime al rialzo (Top + Massa)";
-    } 
-    else if (data.topLong < LOW && data.massaLong < LOW) {
-        type = "📉 FORTE TREND SHORT";
-        desc = "Sentiment unanime al ribasso (Top + Massa)";
-    }
-    else if (data.topLong > HIGH && data.massaLong < LOW) {
-        type = "⚡ SQUEEZE LONG";
-        desc = "Le balene comprano, i piccoli vendono. Probabile esplosione UP.";
-    }
-    else if (data.topLong < LOW && data.massaLong > HIGH) {
-        type = "⚠️ SHORT SQUEEZE (DROP)";
-        desc = "Le balene vendono, i piccoli comprano. Probabile crollo per liquidare la massa.";
+    // LOGICA DIVERGENZE (Eccezioni)
+    if (data.tRatio >= HIGH && data.mRatio <= LOW) {
+        signal = "⚡ SQUEEZE LONG (BULLISH)";
+        emoji = "💰";
+    } else if (data.tRatio <= LOW && data.mRatio >= HIGH) {
+        signal = "⚠️ SHORT SQUEEZE (BEARISH)";
+        emoji = "🚨";
+    } else if (data.tRatio >= HIGH && data.mRatio >= HIGH) {
+        signal = "🚀 FORTE TREND LONG";
+        emoji = "📈";
+    } else if (data.tRatio <= LOW && data.mRatio <= LOW) {
+        signal = "📉 FORTE TREND SHORT";
+        emoji = "📉";
     }
 
-    if (type) {
+    if (signal) {
+        const fundingEmoji = data.funding > 0 ? "🔴" : "🟢"; 
         messages.push(`
-<b>${type}</b>
-<b>Coppia:</b> ${symbol}
-${desc}
+${emoji} <b>${signal}</b>
+<b>Coppia:</b> ${data.symbol}
 ————————————
-Top 100 Long: <b>${(data.topLong * 100).toFixed(1)}%</b>
-Massa Long: <b>${(data.massaLong * 100).toFixed(1)}%</b>
+🟠 Ratio Top 100: <b>${data.tRatio.toFixed(2)}</b>
+🟠 Ratio Massa: <b>${data.mRatio.toFixed(2)}</b>
+💰 Funding: <b>${data.funding.toFixed(4)}%</b> ${fundingEmoji}
         `.trim());
     }
 }
 
 async function scanner() {
-    const res = await axios.get(`${BASE}/v5/market/instruments-info`, { params: { category: "linear" } });
-    const pairs = res.data.result.list.filter(p => p.quoteCoin === "USDT").map(p => p.symbol);
-    
-    console.log(`Analisi di ${pairs.length} coppie...`);
-    const messages = [];
+    try {
+        const res = await axios.get(`${BASE}/v5/market/instruments-info`, { params: { category: "linear" } });
+        const pairs = res.data.result.list.filter(p => p.quoteCoin === "USDT").map(p => p.symbol);
+        
+        console.log(`\n--- Scan ${new Date().toLocaleTimeString()} (${pairs.length} coppie) ---`);
+        const messages = [];
 
-    for (let i = 0; i < pairs.length; i += MAX_CONCURRENT) {
-        const batch = pairs.slice(i, i + MAX_CONCURRENT);
-        await Promise.all(batch.map(s => scanSymbol(s, messages)));
-        await new Promise(r => setTimeout(r, 300));
-    }
+        for (let i = 0; i < pairs.length; i += MAX_CONCURRENT) {
+            const batch = pairs.slice(i, i + MAX_CONCURRENT);
+            await Promise.all(batch.map(s => scanSymbol(s, messages)));
+            await new Promise(r => setTimeout(r, 350));
+        }
 
-    if (messages.length > 0) {
-        await sendTelegram(`<b>📊 REPORT DIVERGENZE BYBIT</b>\n\n` + messages.join("\n\n————————————\n\n"));
-    }
+        if (messages.length > 0) {
+            await sendTelegram(`<b>📊 REPORT ECCEZIONI BYBIT</b>\n\n` + messages.join("\n\n————————\n\n"));
+            console.log(`✅ ${messages.length} segnali inviati.`);
+        } else {
+            console.log("Nessuna eccezione trovata.");
+        }
+    } catch (e) { console.log("Errore:", e.message); }
 }
 
 (async () => {
+    console.log("🚀 Scanner Ratio + Funding avviato...");
     while (true) {
-        try { await scanner(); } catch (e) {}
+        await scanner();
         await new Promise(r => setTimeout(r, SCAN_INTERVAL));
     }
 })();
