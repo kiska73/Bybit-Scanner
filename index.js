@@ -1,7 +1,7 @@
 const axios = require('axios');
 
 // ==========================================
-// CONFIGURAZIONE
+// CONFIGURAZIONE SNIPER ELITE V9.2
 // ==========================================
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
@@ -18,15 +18,15 @@ const BASE_BINANCE = "https://fapi.binance.com";
 let BINANCE_SYMBOLS = new Set();
 let isScanning = false;
 
-// Cache per risparmiare API calls e velocizzare lo scan
+// Cache Smart
 let scanCount = 0;
 const sentimentCache = {};
-const CACHE_TTL = 1000 * 60 * 60 * 3; // 3 ore
+const CACHE_TTL = 1000 * 60 * 60 * 3; 
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ==========================================
-// LOGICA MATEMATICA (Percentile Relativo)
+// LOGICA MATEMATICA
 // ==========================================
 function getRelativePosition(current, history) {
     if (!history || history.length < 24) return 50;
@@ -40,7 +40,7 @@ function getRelativePosition(current, history) {
 }
 
 // ==========================================
-// FETCH DATI CON SMART CACHE & CROSS-DATA
+// FETCH DATI COMPLETO
 // ==========================================
 async function fetchDeepData(symbol, ticker) {
     try {
@@ -95,13 +95,13 @@ async function fetchDeepData(symbol, ticker) {
 }
 
 // ==========================================
-// SCANNER V9.1 - CROSS-EXCHANGE ELITE
+// SCANNER V9.2 - CROSS-EXCHANGE (FUND 0.1%)
 // ==========================================
 async function scan() {
     if (isScanning) return;
     isScanning = true;
     const isCacheUpdate = (scanCount % 3 === 0);
-    console.log(`\n--- [${new Date().toLocaleTimeString()}] SCAN #${scanCount} | CACHE: ${isCacheUpdate ? "RELOAD" : "ATTIVA"} ---`);
+    console.log(`\n--- [${new Date().toLocaleTimeString()}] SCAN #${scanCount} | CACHE: ${isCacheUpdate ? "OFF" : "ON"} ---`);
 
     try {
         const tickersRes = await axios.get(`${BASE_BYBIT}/v5/market/tickers`, { params: { category: 'linear' } });
@@ -109,45 +109,41 @@ async function scan() {
             BINANCE_SYMBOLS.has(t.symbol) && parseFloat(t.turnover24h) >= MIN_VOL_24H_USDT && Math.abs(parseFloat(t.fundingRate)) >= 0.0001
         );
 
-        console.log(`Analisi di ${candidates.length} mercati in corso...`);
+        console.log(`Mercati analizzati: ${candidates.length}`);
 
         for (let i = 0; i < candidates.length; i++) {
             const data = await fetchDeepData(candidates[i].symbol, candidates[i]);
-            await sleep(isCacheUpdate ? 1000 : 150); // Hyper-speed se in cache
+            await sleep(isCacheUpdate ? 1000 : 150);
             if (!data) continue;
 
             let type = ""; let emoji = "🎯"; let finalMsg = "";
             
-            // --- LOGICA ALLINEAMENTO WHALES (CROSS-EXCHANGE) ---
             const isBullishAligned = data.binWhalePos >= SOGLIA_ALTA && data.bybitPos >= 50;
             const isBearishAligned = data.binWhalePos <= SOGLIA_BASSA && data.bybitPos <= 50;
 
-            // 1. PUMP WHALE ALLINEATO (Binance >90% e Bybit >50%)
+            // --- MATRICE SEGNALI AGGIORNATA FUNDING 0.1% (0.0010) ---
+            
             if (isBullishAligned && data.oiRaw > 1) {
                 type = "🟢 POSSIBILE PUMP (Allineamento Whales)";
                 emoji = "🐋💎";
-                finalMsg = "Binance Whales e Bybit Top coordinate al rialzo!";
+                finalMsg = "Whales Binance (>90%) e Bybit (>50%) cariche!";
             }
-            // 2. SHORT SQUEEZE INNESCO (Funding negativo estremo)
-            else if (data.fundingRaw < -0.0030 && data.priceRaw > 0.8 && isBullishAligned) {
+            else if (data.fundingRaw < -0.0010 && data.priceRaw > 0.8 && isBullishAligned) {
                 type = "🟢 SHORT SQUEEZE (Innesco Allineato)";
                 emoji = "⚠️🚀";
-                finalMsg = "Pressione Short estrema e Balene concordi al rialzo!";
+                finalMsg = "Funding Negativo (-0.1%) e Balene coordinate al rialzo!";
             }
-            // 3. LONG TRAP (Funding positivo estremo)
-            else if (data.fundingRaw > 0.0030 && data.priceRaw < -0.8 && isBearishAligned) {
+            else if (data.fundingRaw > 0.0010 && data.priceRaw < -0.8 && isBearishAligned) {
                 type = "🔴 LONG TRAP (Pericolo Crollo Allineato)";
                 emoji = "⚠️🚨";
-                finalMsg = "Retail compra, ma le Balene di entrambi gli exchange sono Short!";
+                finalMsg = "Funding Positivo (+0.1%) e Balene coordinate al ribasso!";
             }
-            // 4. SQUEEZE VIOLENTO (Crollo OI verticale)
             else if (data.oiRaw < -8 && Math.abs(data.priceRaw) > 2) {
                 const dir = data.priceRaw > 0 ? "🟢 BULLISH" : "🔴 BEARISH";
                 type = `${dir} SQUEEZE (Liquidazioni Massa)`;
                 emoji = "🧨";
-                finalMsg = `Liquidazioni forzate in corso verso il ${data.priceRaw > 0 ? 'alto' : 'basso'}.`;
+                finalMsg = `Liquidazioni di massa verso il ${data.priceRaw > 0 ? 'alto' : 'basso'}.`;
             }
-            // 5. ACCUMULO / DISTRIBUZIONE ISTITUZIONALE
             else if (data.binRetailPos <= SOGLIA_BASSA && isBullishAligned) {
                 type = "🟢 ACCUMULO ISTITUZIONALE (Bin+Byb)";
                 emoji = "💎⚡";
@@ -161,17 +157,16 @@ async function scan() {
 
             if (!type) continue;
 
-            // CALCOLO CONFIDENCE SCORE
+            // Score calculation
             let score = 0;
-            if (Math.abs(data.fundingRaw) >= 0.0030) score += 4;
+            if (Math.abs(data.fundingRaw) >= 0.0010) score += 3; // +3 punti per funding caldo
+            if (Math.abs(data.fundingRaw) >= 0.0030) score += 1; // +1 extra se arriva a 0.3%
             if (Math.abs(data.oiRaw) >= 2) score += 2;
-            if (isBullishAligned || isBearishAligned) score += 2; // Bonus allineamento
+            if (isBullishAligned || isBearishAligned) score += 2;
             if (Math.abs(data.priceRaw) >= 1) score += 2;
             score = Math.min(10, score);
 
             const bybitStatus = data.bybitPos > 50 ? "🐂 BULLISH (>50%)" : "🐻 BEARISH (<50%)";
-            
-            // MESSAGGIO TELEGRAM
             const text = `<b>${emoji} SEGNALE: ${type}</b>
 #${data.symbol} @ ${data.price}
 
@@ -189,26 +184,20 @@ Bybit Top 100 → ${bybitStatus}
 <i>${finalMsg}</i>`.trim();
 
             await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "HTML" }).catch(() => {});
-            await sleep(2000); // Anti-flood Telegram
+            await sleep(2000);
         }
     } catch (err) { console.error("Errore Scan:", err.message); }
-    finally { isScanning = false; scanCount++; console.log("--- SCAN COMPLETATO ---"); }
+    finally { isScanning = false; scanCount++; console.log("--- FINE ---"); }
 }
 
-// ==========================================
-// INIZIALIZZAZIONE SISTEMA
-// ==========================================
 async function initialize() {
     try {
         const binInfo = await axios.get(`${BASE_BINANCE}/fapi/v1/exchangeInfo`);
         BINANCE_SYMBOLS = new Set(binInfo.data.symbols.filter(s => s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT').map(s => s.symbol));
         console.log("-----------------------------------------");
-        console.log("SNIPER ELITE v9.1 - MODALITÀ PRODUZIONE");
-        console.log("Configurazione: Funding 0.3% | Soglie 90-10");
+        console.log("SNIPER ELITE v9.2 - FUNDING 0.1%");
         console.log("-----------------------------------------");
-        scan(); 
-        setInterval(scan, SCAN_INTERVAL);
-    } catch (e) { console.error("Errore durante l'inizializzazione:", e.message); }
+        scan(); setInterval(scan, SCAN_INTERVAL);
+    } catch (e) { console.error("Init Error"); }
 }
-
 initialize();
