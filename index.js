@@ -6,183 +6,210 @@ const axios = require('axios');
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
-// Soglie Percentile (0-100) basate su Min-Max 30gg
 const SOGLIA_ALTA = 92; 
 const SOGLIA_BASSA = 8;
-
-const LOOKBACK = 720; // 30 giorni (24h * 30)
+const LOOKBACK = 500; 
 const MIN_VOL_24H_USDT = 2000000;
-const SCAN_INTERVAL = 1000 * 60 * 50; // 50 min
+const SCAN_INTERVAL = 1000 * 60 * 50; 
 
 const BASE_BYBIT   = "https://api.bybit.com";
 const BASE_BINANCE = "https://fapi.binance.com";
 
-let PAIRS = [];
 let BINANCE_SYMBOLS = new Set();
 let isScanning = false;
+
+// Variabili di Cache
+let scanCount = 0;
+const sentimentCache = {};
+const CACHE_TTL = 1000 * 60 * 60 * 3; // 3 ore
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ==========================================
-// FUNZIONE CORE: MIN-MAX NORMALIZATION (0-100)
+// FUNZIONI MATEMATICHE
 // ==========================================
 function getRelativePosition(current, history) {
-    const values = history.map(v => parseFloat(v)).filter(v => !isNaN(v));
-    if (values.length < 24) return 50; 
-    
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    
+    if (!history || history.length < 24) return 50;
+    let min = Infinity, max = -Infinity;
+    for (let i = 0; i < history.length; i++) {
+        const v = history[i];
+        if (v < min) min = v; 
+        if (v > max) max = v;
+    }
     if (max === min) return 50;
-    // Calcola la posizione attuale in 100 parti tra minimo e massimo
     return Math.max(0, Math.min(100, ((current - min) / (max - min)) * 100));
 }
 
 // ==========================================
-// FETCH E ANALISI STORICA
+// FETCH DATI CON SMART CACHE
 // ==========================================
-async function fetchSentimentData(symbol, tickerMap) {
+async function fetchDeepData(symbol, ticker) {
     try {
-        const [bybitRes, binGlobalRes, binTopRes] = await Promise.all([
-            axios.get(`${BASE_BYBIT}/v5/market/account-ratio`, {
-                params: { category: 'linear', symbol, period: '1h', limit: LOOKBACK },
-                timeout: 10000
-            }),
-            axios.get(`${BASE_BINANCE}/futures/data/globalLongShortAccountRatio`, {
-                params: { symbol, period: '1h', limit: 500 },
-                timeout: 10000
-            }),
-            axios.get(`${BASE_BINANCE}/futures/data/topLongShortPositionRatio`, {
-                params: { symbol, period: '1h', limit: 500 },
-                timeout: 10000
-            })
-        ]);
+        let bybitList, binGlobal, binTop, oiRes, klineRes;
+        const isValidCache = sentimentCache[symbol] && (Date.now() - sentimentCache[symbol].timestamp < CACHE_TTL);
+        const useCache = (scanCount % 3 !== 0) && isValidCache;
 
-        const bybitList = bybitRes.data?.result?.list || [];
-        const binGlobal = binGlobalRes.data || [];
-        const binTop    = binTopRes.data || [];
+        if (useCache) {
+            bybitList = sentimentCache[symbol].bybitList;
+            binGlobal = sentimentCache[symbol].binGlobal;
+            binTop    = sentimentCache[symbol].binTop;
 
-        if (bybitList.length < 10 || binGlobal.length < 10) return null;
+            [oiRes, klineRes] = await Promise.all([
+                axios.get(`${BASE_BYBIT}/v5/market/open-interest`, { params: { category: 'linear', symbol, intervalTime: '1h', limit: 5 }, timeout: 5000 }).catch(() => ({data:null})),
+                axios.get(`${BASE_BYBIT}/v5/market/kline`, { params: { category: 'linear', symbol, interval: '60', limit: 5 }, timeout: 5000 }).catch(() => ({data:null}))
+            ]);
+        } else {
+            let [bybitResp, binGlobalResp, binTopResp, oiResp, klineResp] = await Promise.all([
+                axios.get(`${BASE_BYBIT}/v5/market/account-ratio`, { params: { category: 'linear', symbol, period: '1h', limit: LOOKBACK }, timeout: 5000 }).catch(() => ({data:null})),
+                axios.get(`${BASE_BINANCE}/futures/data/globalLongShortAccountRatio`, { params: { symbol, period: '1h', limit: 500 }, timeout: 5000 }).catch(() => ({data:null})),
+                axios.get(`${BASE_BINANCE}/futures/data/topLongShortPositionRatio`, { params: { symbol, period: '1h', limit: 500 }, timeout: 5000 }).catch(() => ({data:null})),
+                axios.get(`${BASE_BYBIT}/v5/market/open-interest`, { params: { category: 'linear', symbol, intervalTime: '1h', limit: 5 }, timeout: 5000 }).catch(() => ({data:null})),
+                axios.get(`${BASE_BYBIT}/v5/market/kline`, { params: { category: 'linear', symbol, interval: '60', limit: 5 }, timeout: 5000 }).catch(() => ({data:null}))
+            ]);
 
-        // 1. BYBIT RETAIL: Min-Max 30gg
-        const bybitHist = bybitList.map(x => parseFloat(x.buyRatio || 0));
-        const bybitPos = getRelativePosition(bybitHist[bybitHist.length - 1], bybitHist);
+            bybitList = bybitResp.data?.result?.list || [];
+            binGlobal = binGlobalResp.data || [];
+            binTop    = binTopResp.data || [];
+            oiRes = oiResp;
+            klineRes = klineResp;
 
-        // 2. BINANCE RETAIL: Min-Max 30gg
-        const binRetailHist = binGlobal.map(x => parseFloat(x.longAccount || 0));
-        const binRetailPos = getRelativePosition(binRetailHist[binRetailHist.length - 1], binRetailHist);
+            if (bybitList.length && binGlobal.length && binTop.length) {
+                sentimentCache[symbol] = { 
+                    bybitList, binGlobal, binTop, 
+                    timestamp: Date.now() 
+                };
+            }
+        }
 
-        // 3. BINANCE WHALES: Min-Max 30gg
-        const binWhaleHist = binTop.map(x => parseFloat(x.longAccount || 0));
-        const binWhalePos = getRelativePosition(binWhaleHist[binWhaleHist.length - 1], binWhaleHist);
+        const oiList = oiRes?.data?.result?.list || [];
+        const klines = klineRes?.data?.result?.list || [];
 
-        const ticker = tickerMap.get(symbol);
+        if (!bybitList.length || !binGlobal.length || !binTop.length || klines.length < 5 || oiList.length < 5) return null;
+
+        const currentPrice = parseFloat(klines[0][4]); 
+        const oldPrice = parseFloat(klines[klines.length - 1][4]); 
+        const pricePct = ((currentPrice - oldPrice) / oldPrice) * 100;
+
+        const currentOI = parseFloat(oiList[0].openInterest);
+        const oldOI = parseFloat(oiList[oiList.length - 1].openInterest);
+        const oiPct = ((currentOI - oldOI) / oldOI) * 100;
+
+        const bybitPos = getRelativePosition(parseFloat(bybitList[0].buyRatio), bybitList.map(x => parseFloat(x.buyRatio)));
+        const binRetailPos = getRelativePosition(parseFloat(binGlobal[binGlobal.length-1].longAccount), binGlobal.map(x => parseFloat(x.longAccount)));
+        const binWhalePos = getRelativePosition(parseFloat(binTop[binTop.length-1].longAccount), binTop.map(x => parseFloat(x.longAccount)));
+
+        const fundingRaw = parseFloat(ticker.fundingRate);
+
         return {
-            symbol,
-            bybitPos, bybitVal: (bybitHist[bybitHist.length - 1] * 100).toFixed(1),
-            binRetailPos, binRetailVal: (binRetailHist[binRetailHist.length - 1] * 100).toFixed(1),
-            binWhalePos, binWhaleVal: (binWhaleHist[binWhaleHist.length - 1] * 100).toFixed(1),
-            price: ticker ? parseFloat(ticker.lastPrice || 0) : 0,
-            funding: ticker ? (parseFloat(ticker.fundingRate || 0) * 100).toFixed(4) : '0.0000'
+            symbol, bybitPos, binRetailPos, binWhalePos, 
+            oiPct: oiPct.toFixed(2), 
+            pricePct: pricePct.toFixed(2),
+            price: currentPrice,
+            funding: (fundingRaw * 100).toFixed(4),
+            fundingRaw,
+            oiRaw: oiPct,
+            priceRaw: pricePct
         };
-    } catch (err) { return null; }
+    } catch (e) { return null; }
 }
 
 // ==========================================
-// SCANNER E LOGICA SEGNALI
+// SCANNER PRINCIPALE V8 – GOD MODE
 // ==========================================
 async function scan() {
     if (isScanning) return;
     isScanning = true;
-    console.log(`\n--- AVVIO SCAN: ${new Date().toLocaleTimeString()} ---`);
+    
+    const isCacheUpdate = (scanCount % 3 === 0);
+    console.log(`\n--- [${new Date().toLocaleTimeString()}] SCAN #${scanCount} | CACHE: ${isCacheUpdate ? "AGGIORNAMENTO" : "ATTIVA"} ---`);
 
     try {
         const tickersRes = await axios.get(`${BASE_BYBIT}/v5/market/tickers`, { params: { category: 'linear' } });
-        const tickerMap = new Map(tickersRes.data.result.list.map(t => [t.symbol, t]));
-        
-        const candidates = PAIRS.filter(s => {
-            const t = tickerMap.get(s);
-            return t && parseFloat(t.turnover24h) >= MIN_VOL_24H_USDT && (BINANCE_SYMBOLS.size === 0 || BINANCE_SYMBOLS.has(s));
+        const allTickers = tickersRes.data?.result?.list || [];
+
+        const candidates = allTickers.filter(t => {
+            const fund = Math.abs(parseFloat(t.fundingRate));
+            return BINANCE_SYMBOLS.has(t.symbol) && 
+                   parseFloat(t.turnover24h) >= MIN_VOL_24H_USDT && 
+                   fund >= 0.0001; 
         });
 
-        for (const symbol of candidates) {
-            const data = await fetchSentimentData(symbol, tickerMap);
+        console.log(`Mercati analizzati: ${candidates.length}`);
+
+        for (let i = 0; i < candidates.length; i++) {
+            const data = await fetchDeepData(candidates[i].symbol, candidates[i]);
+            await sleep(isCacheUpdate ? 1000 : 150);
+
             if (!data) continue;
 
-            let type = "", emoji = "", subtitle = "";
+            let type = "";
+            let emoji = "🎯";
+            let finalMsg = "";
 
-            // LOGICA TRIGGER: Basata esclusivamente sulle posizioni relative (0-100)
-            if (data.binRetailPos >= SOGLIA_ALTA && data.binWhalePos <= SOGLIA_BASSA) {
-                type = "LONG – SQUEEZE DIVERGENZA";
-                emoji = "🚀⚡";
-                subtitle = "Whales SHORT vs Retail LONG";
-            } else if (data.binRetailPos <= SOGLIA_BASSA && data.binWhalePos >= SOGLIA_ALTA) {
-                type = "SHORT – SQUEEZE DIVERGENZA";
-                emoji = "📉⚠️";
-                subtitle = "Whales LONG vs Retail SHORT";
-            } else if (data.binRetailPos >= SOGLIA_ALTA && data.bybitPos >= SOGLIA_ALTA) {
-                type = "LONG – OVERCROWDED";
-                emoji = "🚀🔥";
-                subtitle = "Sentiment unanime Long";
-            } else if (data.binRetailPos <= SOGLIA_BASSA && data.bybitPos <= SOGLIA_BASSA) {
-                type = "SHORT – OVERCROWDED";
-                emoji = "📉❄️";
-                subtitle = "Sentiment unanime Short";
-            }
+            // --- MATRICE SEGNALI ---
+            if (data.binWhalePos >= 97 && data.oiRaw > 1) { type = "WHALE EXTREME ACCUMULATION"; emoji = "🐋💎"; finalMsg = "💥 possibile pump whale"; }
+            else if (data.fundingRaw > 0.0003 && data.priceRaw < -0.8 && data.oiRaw > 2) { type = "LONG TRAP"; emoji = "⚠️🚨"; finalMsg = "💥 possibile long liquidation"; }
+            else if (data.fundingRaw > 0.0003 && data.oiRaw < -3 && data.priceRaw > 1) { type = "FUNDING DIVERGENCE"; emoji = "🚀🔥"; finalMsg = "💥 possibile short squeeze"; }
+            else if (data.fundingRaw < -0.0003 && data.priceRaw > 0.8 && data.oiRaw > 2) { type = "SHORT TRAP"; emoji = "⚠️🚀"; finalMsg = "💥 possibile short liquidation"; }
+            else if (data.oiRaw < -8 && Math.abs(data.priceRaw) > 2) { type = "TRUE SQUEEZE"; emoji = "🧨"; finalMsg = "💥 possibile liquidation in corso"; }
+            else if (data.binRetailPos >= SOGLIA_ALTA && data.binWhalePos <= SOGLIA_BASSA) { type = "DIVERGENZA"; emoji = "⚡"; finalMsg = "💥 possibile inversione retail/whale"; }
+            else if (data.binRetailPos <= SOGLIA_BASSA && data.binWhalePos >= SOGLIA_ALTA) { type = "DIVERGENZA"; emoji = "⚡"; finalMsg = "💥 possibile inversione retail/whale"; }
 
-            if (type) {
-                // Calcolo somiglianza tra i due exchange (Retail)
-                const similarity = (100 - Math.abs(data.binRetailPos - data.bybitPos)).toFixed(0);
-                
-                const text = `
-<b>${emoji} ${type}</b>
+            if (!type) continue;
+
+            // --- CALCOLO SCORE ---
+            let score = 0;
+            if (Math.abs(data.fundingRaw) >= 0.0003) score += 2;
+            if (Math.abs(data.oiRaw) >= 2) score += 2;
+            if (Math.abs(data.priceRaw) >= 1) score += 2;
+            if (data.binWhalePos >= 90 || data.binWhalePos <= 10) score += 2;
+            if (data.binRetailPos >= 90 || data.binRetailPos <= 10) score += 2;
+            score = Math.min(10, score);
+            const scoreEmoji = score >= 8 ? "🔥" : score >= 6 ? "🟡" : "⚪";
+
+            // --- INVIO TELEGRAM ---
+            const text = `
+<b>${emoji} SEGNALE: ${type}</b>
 #${data.symbol} @ ${data.price}
-${subtitle}
 
-<b>CONFLUENZA EXCHANGE:</b> ${similarity}%
-----------------------------------
-<b>BINANCE:</b>
-Retail: <b>${data.binRetailVal}%</b> (Pos: ${data.binRetailPos.toFixed(0)}%)
-Whales: <b>${data.binWhaleVal}%</b> (Pos: ${data.binWhalePos.toFixed(0)}%)
+🔥 Score: ${score}/10 ${scoreEmoji}
 
-<b>BYBIT:</b>
-Retail: <b>${data.bybitVal}%</b> (Pos: ${data.bybitPos.toFixed(0)}%)
+📊 4H DATA
+Price → ${data.pricePct}%
+OI → ${data.oiPct}%
+Funding → ${data.funding}%
 
-<b>FUNDING:</b> <b>${data.funding}%</b>
-                `.trim();
+👥 Sentiment
+Retail → ${data.binRetailPos.toFixed(0)}%
+Whales → ${data.binWhalePos.toFixed(0)}%
+Bybit → ${data.bybitPos.toFixed(0)}%
 
-                console.log(`[!] SEGNALE INVIATO: ${symbol}`);
-                await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-                    chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "HTML"
-                }).catch(() => {});
-                await sleep(500);
-            }
+${finalMsg}
+            `.trim();
+
+            await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "HTML" }).catch(() => {});
+            await sleep(2000);
         }
+
     } catch (err) { console.error("Errore Scan:", err.message); }
-    finally { isScanning = false; console.log("--- SCAN COMPLETATO ---"); }
+    finally { 
+        isScanning = false; 
+        scanCount++; 
+        console.log("--- SCAN COMPLETATO ---"); 
+    }
 }
 
 // ==========================================
 // INIZIALIZZAZIONE
 // ==========================================
-async function loadBinanceSymbols() {
+async function initialize() {
     try {
         const binInfo = await axios.get(`${BASE_BINANCE}/fapi/v1/exchangeInfo`);
         BINANCE_SYMBOLS = new Set(binInfo.data.symbols.filter(s => s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT').map(s => s.symbol));
-    } catch (e) {}
-}
-
-async function initialize() {
-    try {
-        const res = await axios.get(`${BASE_BYBIT}/v5/market/instruments-info`, { params: { category: "linear" } });
-        PAIRS = res.data.result.list.filter(p => p.quoteCoin === "USDT" && p.status === "Trading").map(p => p.symbol);
-        
-        await loadBinanceSymbols();
-        setInterval(loadBinanceSymbols, 1000 * 60 * 60 * 12);
-        
+        console.log("Sistema Quant v8 (God Mode) Online. Caccia aperta!");
         scan();
         setInterval(scan, SCAN_INTERVAL);
-    } catch (e) { console.error("Inizializzazione fallita"); }
+    } catch (e) { console.error("Init Error:", e.message); }
 }
 
 initialize();
