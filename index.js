@@ -6,8 +6,8 @@ const axios = require('axios');
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
-const SOGLIA_ALTA = 90; 
-const SOGLIA_BASSA = 10;
+const SOGLIA_ALTA = 90;   // Modificata su tua richiesta
+const SOGLIA_BASSA = 10;  // Modificata su tua richiesta
 const LOOKBACK = 500; 
 const MIN_VOL_24H_USDT = 2000000;
 const SCAN_INTERVAL = 1000 * 60 * 50; 
@@ -146,18 +146,53 @@ async function scan() {
             let emoji = "🎯";
             let finalMsg = "";
 
-            // --- MATRICE SEGNALI ---
-            if (data.binWhalePos >= 97 && data.oiRaw > 1) { type = "WHALE EXTREME ACCUMULATION"; emoji = "🐋💎"; finalMsg = "💥 possibile pump whale"; }
-            else if (data.fundingRaw > 0.0003 && data.priceRaw < -0.8 && data.oiRaw > 2) { type = "LONG TRAP"; emoji = "⚠️🚨"; finalMsg = "💥 possibile long liquidation"; }
-            else if (data.fundingRaw > 0.0003 && data.oiRaw < -3 && data.priceRaw > 1) { type = "FUNDING DIVERGENCE"; emoji = "🚀🔥"; finalMsg = "💥 possibile short squeeze"; }
-            else if (data.fundingRaw < -0.0003 && data.priceRaw > 0.8 && data.oiRaw > 2) { type = "SHORT TRAP"; emoji = "⚠️🚀"; finalMsg = "💥 possibile short liquidation"; }
-            else if (data.oiRaw < -8 && Math.abs(data.priceRaw) > 2) { type = "TRUE SQUEEZE"; emoji = "🧨"; finalMsg = "💥 possibile liquidation in corso"; }
-            else if (data.binRetailPos >= SOGLIA_ALTA && data.binWhalePos <= SOGLIA_BASSA) { type = "DIVERGENZA"; emoji = "⚡"; finalMsg = "💥 possibile inversione retail/whale"; }
-            else if (data.binRetailPos <= SOGLIA_BASSA && data.binWhalePos >= SOGLIA_ALTA) { type = "DIVERGENZA"; emoji = "⚡"; finalMsg = "💥 possibile inversione retail/whale"; }
+            // --- MATRICE SEGNALI (NOMENCLATURA CHIARA) ---
+            
+            // 1. PUMP WHALE (Whales cariche + OI crescente)
+            if (data.binWhalePos >= 97 && data.oiRaw > 1) { 
+                type = "POSSIBILE PUMP (Whale Accumulation)"; 
+                emoji = "🐋💎"; 
+                finalMsg = "💥 Le balene stanno caricando pesantemente."; 
+            }
+            // 2. LONG TRAP (Long intrappolati: prezzo giù, OI su, funding alto)
+            else if (data.fundingRaw > 0.0003 && data.priceRaw < -0.8 && data.oiRaw > 2) { 
+                type = "LONG TRAP (Possibile Crollo)"; 
+                emoji = "⚠️🚨"; 
+                finalMsg = "💥 Long intrappolati: possibile cascata di liquidazioni."; 
+            }
+            // 3. SHORT SQUEEZE GIÀ PARTITO (Funding alto, OI scende, Prezzo esplode)
+            else if (data.fundingRaw > 0.0003 && data.oiRaw < -3 && data.priceRaw > 1) { 
+                type = "SHORT SQUEEZE (Liquidazioni in Corso)"; 
+                emoji = "🚀🔥"; 
+                finalMsg = "💥 Gli Short stanno esplodendo ora!"; 
+            }
+            // 4. SHORT SQUEEZE INNESCO (KITE CASE: Funding negativo, prezzo sale, OI sale)
+            else if (data.fundingRaw < -0.0003 && data.priceRaw > 0.8 && data.oiRaw > 2) { 
+                type = "SHORT SQUEEZE (Innesco imminente)"; 
+                emoji = "⚠️🚀"; 
+                finalMsg = "💥 Short bloccati sotto pressione: pronti a saltare."; 
+            }
+            // 5. TRUE SQUEEZE (Crollo OI verticale)
+            else if (data.oiRaw < -8 && Math.abs(data.priceRaw) > 2) { 
+                type = "SQUEEZE VIOLENTO (Liquidazioni Massa)"; 
+                emoji = "🧨"; 
+                finalMsg = "💥 Movimento guidato da chiusure forzate (Stop Loss)."; 
+            }
+            // 6. ACCUMULO WHALE / DISTRIBUZIONE (Divergenza Sentiment)
+            else if (data.binRetailPos >= SOGLIA_ALTA && data.binWhalePos <= SOGLIA_BASSA) { 
+                type = "DISTRIBUZIONE (Whales Short / Retail Long)"; 
+                emoji = "⚡"; 
+                finalMsg = "💥 Possibile inversione: le balene stanno scaricando."; 
+            }
+            else if (data.binRetailPos <= SOGLIA_BASSA && data.binWhalePos >= SOGLIA_ALTA) { 
+                type = "ACCUMULO (Whales Long / Retail Short)"; 
+                emoji = "💎⚡"; 
+                finalMsg = "💥 Possibile pump: le balene stanno accumulando."; 
+            }
 
             if (!type) continue;
 
-            // --- CALCOLO SCORE ---
+            // --- CALCOLO SCORE (0-10) ---
             let score = 0;
             if (Math.abs(data.fundingRaw) >= 0.0003) score += 2;
             if (Math.abs(data.oiRaw) >= 2) score += 2;
@@ -172,19 +207,19 @@ async function scan() {
 <b>${emoji} SEGNALE: ${type}</b>
 #${data.symbol} @ ${data.price}
 
-🔥 Score: ${score}/10 ${scoreEmoji}
+🔥 <b>Score: ${score}/10 ${scoreEmoji}</b>
 
-📊 4H DATA
-Price → ${data.pricePct}%
-OI → ${data.oiPct}%
-Funding → ${data.funding}%
+📊 <b>4H DATA</b>
+Prezzo → <code>${data.pricePct}%</code>
+Open Int. → <code>${data.oiPct}%</code>
+Funding → <code>${data.funding}%</code>
 
-👥 Sentiment
+👥 <b>SENTIMENT (Pos. Storica)</b>
 Retail → ${data.binRetailPos.toFixed(0)}%
 Whales → ${data.binWhalePos.toFixed(0)}%
 Bybit → ${data.bybitPos.toFixed(0)}%
 
-${finalMsg}
+<i>${finalMsg}</i>
             `.trim();
 
             await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "HTML" }).catch(() => {});
@@ -206,7 +241,7 @@ async function initialize() {
     try {
         const binInfo = await axios.get(`${BASE_BINANCE}/fapi/v1/exchangeInfo`);
         BINANCE_SYMBOLS = new Set(binInfo.data.symbols.filter(s => s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT').map(s => s.symbol));
-        console.log("Sistema Quant v8 (God Mode) Online. Caccia aperta!");
+        console.log("Sistema Quant v8 (Soglie 90/10) Online. Caccia aperta!");
         scan();
         setInterval(scan, SCAN_INTERVAL);
     } catch (e) { console.error("Init Error:", e.message); }
