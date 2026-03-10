@@ -1,8 +1,8 @@
 const axios = require('axios');
 
 // ==========================================
-// SNIPER ELITE v11 - TRUTH DETECTOR EDITION
-// Focus: Rilevazione Trappole e Divergenze
+// SNIPER ELITE v12 - SPECULATOR EDITION
+// Focus: Indice di Speculazione (OI/Vol) & Trappole
 // ==========================================
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
@@ -73,11 +73,17 @@ async function fetchDeepData(symbol, ticker) {
         const pricePct = ((currentPrice - parseFloat(klines[klines.length-1][4])) / parseFloat(klines[klines.length-1][4])) * 100;
         const oiPct = ((parseFloat(oiList[0].openInterest) - parseFloat(oiList[oiList.length-1].openInterest)) / parseFloat(oiList[oiList.length-1].openInterest)) * 100;
 
+        // Calcolo Spec Index (OI in USDT / Vol 24h in USDT)
+        const oiUsdt = parseFloat(oiList[0].openInterest) * currentPrice;
+        const vol24h = parseFloat(ticker.turnover24h);
+        const specIndex = (oiUsdt / vol24h) * 100;
+
         return {
             symbol, bybitPos, binWhalePos, binWhaleRatio,
             oiPct: oiPct.toFixed(2), pricePct: pricePct.toFixed(2),
             price: currentPrice, funding: (parseFloat(ticker.fundingRate) * 100).toFixed(4),
-            fundingRaw: parseFloat(ticker.fundingRate), oiRaw: oiPct, priceRaw: pricePct
+            fundingRaw: parseFloat(ticker.fundingRate), oiRaw: oiPct, priceRaw: pricePct,
+            specIndex: specIndex.toFixed(1)
         };
     } catch (e) { return null; }
 }
@@ -108,45 +114,48 @@ async function scan() {
             let type = ""; let emoji = "🎯"; let alertStatus = "✅ CONFERMATO";
             let finalMsg = "";
 
-            // --- LOGICA DIVERGENZA (LA FINTA) ---
             const isWhaleLong = data.binWhaleRatio > 50;
             const priceIsFalling = data.priceRaw < -0.3;
             const priceIsRising = data.priceRaw > 0.3;
 
+            // Rilevazione Trappole
             if (isWhaleLong && priceIsFalling) {
                 alertStatus = "⚠️ DIVERGENZA: BULL TRAP?";
-                type = "🔴 POSSIBILE TRAPPOLA PER LONG";
+                type = "🔴 TRAPPOLA PER LONG";
                 emoji = "🪤";
-                finalMsg = "Le Balene caricano Long ma il prezzo cade. Possibile caccia agli stop!";
+                finalMsg = "Balene Long ma il prezzo cade. Occhio agli Stop!";
             } else if (!isWhaleLong && priceIsRising) {
                 alertStatus = "⚠️ DIVERGENZA: BEAR TRAP?";
-                type = "🟢 POSSIBILE TRAPPOLA PER SHORT";
+                type = "🟢 TRAPPOLA PER SHORT";
                 emoji = "🪤";
-                finalMsg = "Le Balene caricano Short ma il prezzo sale. Possibile Short Squeeze in arrivo!";
+                finalMsg = "Balene Short ma il prezzo sale. Squeeze in arrivo!";
             } else {
-                // --- SEGNALI STANDARD SE PREZZO E SENTIMENT SONO ALLINEATI ---
                 if (data.oiRaw < -3.5) {
                     type = data.priceRaw > 0 ? "🟢 BULLISH SQUEEZE" : "🔴 BEARISH SQUEEZE";
                     emoji = "🧨";
-                    finalMsg = "Liquidazioni in corso. Segui il trend veloce!";
+                    finalMsg = "Liquidazioni pesanti rilevate!";
                 } else if (data.fundingRaw < -0.0015) {
                     type = "🟢 SHORT SQUEEZE (Innesco)";
                     emoji = "🔥";
-                    finalMsg = "Funding negativo estremo. Gli shortisti pagano caro.";
+                    finalMsg = "Funding negativo e pressione acquisto.";
                 } else if (data.binWhalePos > 92) {
                     type = "🟢 WHALE PUMP (Alta Confidenza)";
                     emoji = "🐋";
-                    finalMsg = "Allineamento Balene massimo. Forza confermata.";
+                    finalMsg = "Le balene stanno spingendo forte.";
                 }
             }
 
             if (!type) continue;
+
+            // Nota sulla speculazione
+            const tension = data.specIndex > 50 ? "🔥 ALTA" : "🧊 BASSA";
 
             const text = `<b>${emoji} ${type}</b>
 #${data.symbol} @ ${data.price}
 
 🔥 <b>Score: ${score}/10</b>
 📢 <b>Stato: ${alertStatus}</b>
+⚡ <b>Spec. Index: ${data.specIndex}% (${tension})</b>
 
 📊 <b>DATA 4H</b>
 OI: <code>${data.oiPct}%</code> | Fund: <code>${data.funding}%</code>
@@ -169,7 +178,7 @@ async function initialize() {
     try {
         const binInfo = await axios.get(`${BASE_BINANCE}/fapi/v1/exchangeInfo`);
         BINANCE_SYMBOLS = new Set(binInfo.data.symbols.filter(s => s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT').map(s => s.symbol));
-        console.log("Sniper Elite v11 - Truth Detector Online. Pronto a scovare le trappole.");
+        console.log("Sniper Elite v12 - SPECULATOR Online. Pronti al botto.");
         scan(); setInterval(scan, SCAN_INTERVAL);
     } catch (e) {}
 }
