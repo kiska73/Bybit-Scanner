@@ -1,13 +1,12 @@
 const axios = require('axios');
 
 // ==========================================
-// CONFIGURAZIONE V9.8 - PROFESSIONAL SNIPER (SCORE > 6)
+// SNIPER ELITE v10 - MANUAL TRADE EDITION
+// Focus: Squeeze & Liquidazioni (Score > 6)
 // ==========================================
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
-const SOGLIA_ALTA = 90;   
-const SOGLIA_BASSA = 10;  
 const MIN_VOL_24H_USDT = 3000000; 
 const SCAN_INTERVAL = 1000 * 60 * 50; 
 
@@ -97,43 +96,43 @@ async function scan() {
             await sleep(150);
             if (!data) continue;
 
+            // --- CALCOLO SCORE DI QUALITÀ RIGIDO ---
             let score = 0;
-            // --- CALCOLO SCORE DI QUALITÀ ---
-            if (Math.abs(data.fundingRaw) >= 0.0015) score += 3; // Funding pesante
-            if (data.binWhalePos >= 90 || data.binWhalePos <= 10) score += 3; // Estremo Whale
-            if (Math.abs(data.oiRaw) >= 4.0) score += 2; // Movimento OI serio
-            if (Math.abs(data.priceRaw) >= 1.5) score += 2; // Volatilità prezzo
+            if (Math.abs(data.fundingRaw) >= 0.0015) score += 3; 
+            if (data.binWhalePos >= 90 || data.binWhalePos <= 10) score += 3; 
+            if (Math.abs(data.oiRaw) >= 3.0) score += 2; 
+            if (Math.abs(data.priceRaw) >= 1.2) score += 2;
             score = Math.min(10, score);
 
-            // --- FILTRO QUALITÀ: SOLO SCORE > 6 ---
+            // SOLO SEGNALI DI ALTA QUALITÀ
             if (score <= 6) continue;
 
             let type = ""; let emoji = "🎯"; let finalMsg = "";
             
-            // 1. SQUEEZE (Liquidazioni pesanti)
-            if (data.oiRaw < -4.5 && Math.abs(data.priceRaw) > 1.2) {
+            // 1. SQUEEZE (Liquidazioni in corso)
+            if (data.oiRaw < -3.5 && Math.abs(data.priceRaw) > 1.0) {
                 const dir = data.priceRaw > 0 ? "🟢 BULLISH" : "🔴 BEARISH";
                 type = `${dir} SQUEEZE (Liquidazioni)`;
                 emoji = "🧨";
-                finalMsg = "Crollo verticale dell'OI con volatilità: qualcuno è stato liquidato!";
+                finalMsg = "L'Open Interest sta crollando: segui il trend delle liquidazioni!";
             }
-            // 2. SHORT SQUEEZE INNESCO
-            else if (data.fundingRaw < -0.0015 && data.priceRaw > 1.0 && data.binWhaleRatio > 50) {
+            // 2. SHORT SQUEEZE INNESCO (Funding Negativo)
+            else if (data.fundingRaw < -0.0015 && data.priceRaw > 0.8 && data.binWhaleRatio > 50) {
                 type = "🟢 SHORT SQUEEZE (Innesco)";
                 emoji = "⚠️🔥";
-                finalMsg = "Funding molto negativo e Balene Long. Carico esplosivo!";
+                finalMsg = "Shortisti sotto pressione e Balene Long. Occhio al botto!";
             }
-            // 3. LONG TRAP
-            else if (data.fundingRaw > 0.0015 && data.priceRaw < -1.0 && data.binWhaleRatio < 50) {
+            // 3. LONG TRAP (Funding Positivo)
+            else if (data.fundingRaw > 0.0015 && data.priceRaw < -0.8 && data.binWhaleRatio < 50) {
                 type = "🔴 LONG TRAP (Pericolo)";
                 emoji = "⚠️📉";
-                finalMsg = "Long intrappolati mentre il funding scotta.";
+                finalMsg = "Long intrappolati e Funding alto. Possibile crollo veloce!";
             }
-            // 4. WHALE POWER
-            else if (data.binWhalePos > 93 && data.bybitPos > 60 && data.oiRaw > 1.5) {
-                type = "🟢 WHALE PUMP (High Confidence)";
+            // 4. WHALE POWER (Pump di forza)
+            else if (data.binWhalePos > 92 && data.bybitPos > 55 && data.oiRaw > 1.0) {
+                type = "🟢 WHALE PUMP (Alta Confidenza)";
                 emoji = "🐋🚀";
-                finalMsg = "Massimo allineamento balene e volumi in ingresso.";
+                finalMsg = "Massimo carico balene confermato. Forza in acquisto.";
             }
 
             if (!type) continue;
@@ -147,8 +146,8 @@ async function scan() {
 OI: <code>${data.oiPct}%</code> | Fund: <code>${data.funding}%</code>
 Price: <code>${data.pricePct}%</code>
 
-👥 <b>SENTIMENT</b>
-Binance Whales: ${data.binWhaleRatio.toFixed(1)}% (Pos: ${data.binWhalePos.toFixed(0)}%)
+👥 <b>SENTIMENT WHALES</b>
+Binance: ${data.binWhaleRatio.toFixed(1)}% (Pos: ${data.binWhalePos.toFixed(0)}%)
 Bybit Top 100: ${data.bybitPos.toFixed(0)}%
 
 <i>${finalMsg}</i>`.trim();
@@ -164,7 +163,7 @@ async function initialize() {
     try {
         const binInfo = await axios.get(`${BASE_BINANCE}/fapi/v1/exchangeInfo`);
         BINANCE_SYMBOLS = new Set(binInfo.data.symbols.filter(s => s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT').map(s => s.symbol));
-        console.log("Sniper Elite v9.8 - ONLINE. Qualità filtrata > 6.");
+        console.log("Sniper Elite v10 - Manual Mode. Score > 6. Squeeze attivo.");
         scan(); setInterval(scan, SCAN_INTERVAL);
     } catch (e) {}
 }
