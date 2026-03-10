@@ -1,14 +1,14 @@
 const axios = require('axios');
 
 // ==========================================
-// CONFIGURAZIONE V9.4 - REACTIVE EDITION
+// CONFIGURAZIONE V9.7 - ELITE SNIPER (SCORE > 5)
 // ==========================================
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
 const SOGLIA_ALTA = 90;   
 const SOGLIA_BASSA = 10;  
-const MIN_VOL_24H_USDT = 2000000;
+const MIN_VOL_24H_USDT = 3000000; // Alzato a 3M per filtrare monete troppo sottili
 const SCAN_INTERVAL = 1000 * 60 * 50; 
 
 const BASE_BYBIT   = "https://api.bybit.com";
@@ -66,7 +66,6 @@ async function fetchDeepData(symbol, ticker) {
 
         const binWhaleRatio = parseFloat(binTop[binTop.length - 1].longAccount) * 100;
         const binWhalePos = getRelativePosition(parseFloat(binTop[binTop.length - 1].longAccount), binTop.map(x => parseFloat(x.longAccount)));
-        const binRetailPos = getRelativePosition(parseFloat(binGlobal[binGlobal.length - 1].longAccount), binGlobal.map(x => parseFloat(x.longAccount)));
         const bybitPos = getRelativePosition(parseFloat(bybitList[0].buyRatio), bybitList.map(x => parseFloat(x.buyRatio)));
 
         const klines = klineRes?.data?.result?.list || [];
@@ -76,7 +75,7 @@ async function fetchDeepData(symbol, ticker) {
         const oiPct = ((parseFloat(oiList[0].openInterest) - parseFloat(oiList[oiList.length-1].openInterest)) / parseFloat(oiList[oiList.length-1].openInterest)) * 100;
 
         return {
-            symbol, bybitPos, binRetailPos, binWhalePos, binWhaleRatio,
+            symbol, bybitPos, binWhalePos, binWhaleRatio,
             oiPct: oiPct.toFixed(2), pricePct: pricePct.toFixed(2),
             price: currentPrice, funding: (parseFloat(ticker.fundingRate) * 100).toFixed(4),
             fundingRaw: parseFloat(ticker.fundingRate), oiRaw: oiPct, priceRaw: pricePct
@@ -99,51 +98,52 @@ async function scan() {
             if (!data) continue;
 
             let type = ""; let emoji = "🎯"; let finalMsg = "";
-            
-            // CONDIZIONI FLESSIBILI (Senza blocchi rigidi di % OI)
-            const whaleLong = data.binWhaleRatio > 50;
-            const whaleShort = data.binWhaleRatio < 50;
+            let score = 0;
 
-            // 1. SQUEEZE (Qualsiasi calo OI significativo con movimento prezzo)
-            if (data.oiRaw < -1.5 && Math.abs(data.priceRaw) > 0.5) {
+            // --- CALCOLO SCORE PREVENTIVO ---
+            if (Math.abs(data.fundingRaw) >= 0.0015) score += 3;
+            if (data.binWhalePos >= 90 || data.binWhalePos <= 10) score += 3;
+            if (Math.abs(data.oiRaw) >= 3.5) score += 2;
+            if (Math.abs(data.priceRaw) >= 1.2) score += 2;
+            score = Math.min(10, score);
+
+            // --- FILTRO DI QUALITÀ: SOLO SCORE > 5 ---
+            if (score < 5) continue;
+
+            // --- LOGICA SEGNALI RESTRITTIVA ---
+            
+            // 1. SQUEEZE (Liquidazioni pesanti)
+            if (data.oiRaw < -4.0 && Math.abs(data.priceRaw) > 1.0) {
                 const dir = data.priceRaw > 0 ? "🟢 BULLISH" : "🔴 BEARISH";
                 type = `${dir} SQUEEZE (Liquidazioni)`;
                 emoji = "🧨";
-                finalMsg = "L'Open Interest sta calando: qualcuno sta venendo liquidato!";
+                finalMsg = "L'OI sta crollando bruscamente: qualcuno è saltato in aria!";
             }
             // 2. SHORT SQUEEZE INNESCO
-            else if (data.fundingRaw < -0.0010 && data.priceRaw > 0.5) {
+            else if (data.fundingRaw < -0.0015 && data.priceRaw > 0.8 && data.binWhaleRatio > 50) {
                 type = "🟢 SHORT SQUEEZE (Innesco)";
                 emoji = "⚠️🔥";
-                finalMsg = "Pressione Short e prezzo che sale. Occhio al botto!";
+                finalMsg = "Funding negativo e balene Long. Gli shortisti sono in trappola!";
             }
             // 3. LONG TRAP
-            else if (data.fundingRaw > 0.0010 && data.priceRaw < -0.5) {
+            else if (data.fundingRaw > 0.0015 && data.priceRaw < -0.8 && data.binWhaleRatio < 50) {
                 type = "🔴 LONG TRAP (Pericolo)";
                 emoji = "⚠️📉";
-                finalMsg = "Long intrappolati mentre il prezzo affonda.";
+                finalMsg = "Long intrappolati mentre le balene spingono short.";
             }
-            // 4. POSSIBILE PUMP (Basato su Allineamento)
-            else if (data.binWhalePos > 85 && data.bybitPos > 50 && data.oiRaw > 0.5) {
-                type = "🟢 POSSIBILE PUMP (Whale Accumulation)";
+            // 4. WHALE POWER
+            else if (data.binWhalePos > 92 && data.bybitPos > 55 && data.oiRaw > 1.0) {
+                type = "🟢 WHALE PUMP (Alta confidenza)";
                 emoji = "🐋🚀";
-                finalMsg = "Le balene caricano e l'OI sale. Preparazione al movimento.";
+                finalMsg = "Massimo carico balene su entrambi gli exchange.";
             }
 
             if (!type) continue;
 
-            // Score dinamico
-            let score = 0;
-            if (Math.abs(data.fundingRaw) >= 0.0010) score += 3;
-            if (data.binWhalePos >= 85 || data.binWhalePos <= 15) score += 3;
-            if (Math.abs(data.oiRaw) >= 3) score += 2;
-            if (Math.abs(data.priceRaw) >= 1) score += 2;
-            score = Math.min(10, score);
-
             const text = `<b>${emoji} SEGNALE: ${type}</b>
 #${data.symbol} @ ${data.price}
 
-🔥 <b>Score: ${score}/10</b>
+🔥 <b>Score: ${score}/10 ${score >= 8 ? "🔥" : ""}</b>
 
 📊 <b>4H DATA</b>
 OI: <code>${data.oiPct}%</code> | Fund: <code>${data.funding}%</code>
@@ -166,7 +166,7 @@ async function initialize() {
     try {
         const binInfo = await axios.get(`${BASE_BINANCE}/fapi/v1/exchangeInfo`);
         BINANCE_SYMBOLS = new Set(binInfo.data.symbols.filter(s => s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT').map(s => s.symbol));
-        console.log("Sniper Elite v9.4 - Modalità Reattiva Attiva.");
+        console.log("Sniper Elite v9.7 - Filtro Qualità Attivo (Score > 5)");
         scan(); setInterval(scan, SCAN_INTERVAL);
     } catch (e) {}
 }
