@@ -1,8 +1,8 @@
 const axios = require('axios');
 
 // ==========================================================================
-// SNIPER ELITE v15.4 - ACTIONABLE QUANT SNIPER
-// Focus: Batching, Exponential OB, Funding-Weighted SpecIndex & Narrative
+// SNIPER ELITE v15.5 - DIRECTIONAL QUANT SNIPER
+// Focus: Explicit Directional Logic, Batching, Exp-OB & Funding Filter
 // ==========================================================================
 
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
@@ -10,7 +10,7 @@ const TELEGRAM_CHAT_ID   = '820279313';
 
 const MIN_VOL_24H_USDT = 3000000; 
 const SCAN_INTERVAL = 1000 * 60 * 45; 
-const BATCH_SIZE = 4; // Processa 4 monete in parallelo
+const BATCH_SIZE = 4; 
 
 const BASE_BYBIT   = "https://api.bybit.com";
 const BASE_BINANCE = "https://fapi.binance.com";
@@ -21,7 +21,7 @@ let isBanned = false;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// --- GESTIONE RATE LIMIT DINAMICA ---
+// --- GESTIONE RATE LIMIT CON RETRY-AFTER ---
 async function safeApiCall(url, params) {
     if (isBanned) return null;
     try {
@@ -37,7 +37,7 @@ async function safeApiCall(url, params) {
     }
 }
 
-// --- ANALISI PROFONDA SINGOLA MONETA ---
+// --- ANALISI QUANTITATIVA ---
 async function fetchDeepData(symbol, ticker) {
     try {
         let [bybitResp, binGlobalResp, binTopResp, oiResp] = await Promise.all([
@@ -55,7 +55,7 @@ async function fetchDeepData(symbol, ticker) {
 
         if (!binTop.length || !binGlobal.length || !oiListRaw.length) return null;
 
-        // --- 1. OPEN INTEREST & SPEC INDEX (Funding * 30) ---
+        // --- 1. OI & SPEC INDEX (Funding Multiplier 30) ---
         const sortedOi = [...oiListRaw].sort((a, b) => parseInt(a.timestamp) - parseInt(b.timestamp));
         const newestOi = parseFloat(sortedOi[sortedOi.length - 1].openInterest);
         const oldestOi = parseFloat(sortedOi[0].openInterest);
@@ -65,10 +65,9 @@ async function fetchDeepData(symbol, ticker) {
         const fundingRaw = parseFloat(ticker.fundingRate);
         const hourlyVol = (parseFloat(ticker.turnover24h) / 24);
         
-        // Formula: (OI_USDT / Vol_Orario) * (1 + |Fund| * 30)
         const specIndex = (newestOi * currentPrice / hourlyVol) * (1 + Math.abs(fundingRaw) * 30);
 
-        // --- 2. PRE-FILTRO (Salva-API) ---
+        // --- 2. PRE-FILTRO ---
         if (Math.abs(oiPct) < 1.5 && specIndex < 80) return null;
 
         // --- 3. ORDERBOOK EXPONENTIAL DECAY ---
@@ -102,11 +101,10 @@ async function fetchDeepData(symbol, ticker) {
     } catch (e) { return null; }
 }
 
-// --- CICLO DI SCANSIONE ---
+// --- LOGICA DI SCANSIONE ---
 async function scan() {
     if (isScanning || isBanned) return;
     isScanning = true;
-    console.log(`[${new Date().toLocaleTimeString()}] Scansione avviata...`);
     
     try {
         const tickersRes = await safeApiCall(`${BASE_BYBIT}/v5/market/tickers`, { category: 'linear' });
@@ -125,7 +123,7 @@ async function scan() {
             for (const data of results) {
                 if (!data) continue;
 
-                // --- CALCOLO SCORE PESATO ---
+                // --- SCORE PESATO ---
                 let score = 0;
                 if (Math.abs(data.divergenceVal) > 8) score += 4;
                 if (data.obRatio > 1.6 || data.obRatio < 0.6) score += 3;
@@ -140,12 +138,12 @@ async function scan() {
                     const bookSupportsBuy = data.obRatio > 1.4;
                     const bookSupportsSell = data.obRatio < 0.7;
 
-                    // --- LOGICA NARRATIVA ---
+                    // --- LOGICA NARRATIVA DIREZIONALE ---
                     if (isSqueezing) {
                         if (whaleBullish && bookSupportsBuy) {
                             title = "🟢 SQUEEZE + CONTINUAZIONE RIBA";
                             emoji = "🚀🔥";
-                            desc = "Retail short saltati. Whales e Book spingono ancora. Il trend ha benzina.";
+                            desc = "Retail short esplosi. Whales e Book spingono ancora. Il trend ha benzina.";
                         } else if (whaleBullish && bookSupportsSell) {
                             title = "🟡 SQUEEZE REVERSE (Target Raggiunto)";
                             emoji = "⚠️🔄";
@@ -153,36 +151,52 @@ async function scan() {
                         } else if (whaleBearish && bookSupportsSell) {
                             title = "🔴 SQUEEZE + CONTINUAZIONE RIBASSO";
                             emoji = "🩸📉";
-                            desc = "Retail long liquidati. Le balene pressano ancora in Ask. Non comprare il dip.";
+                            desc = "Retail long liquidati. Le balene pressano ancora in vendita. Non comprare il dip.";
                         } else if (whaleBearish && bookSupportsBuy) {
                             title = "🔵 SQUEEZE REVERSE (Muro Buy)";
                             emoji = "🛒✅";
                             desc = "Liquidazioni long terminate. Il book ha creato un muro in Bid. Rimbalzo probabile.";
                         }
-                    } else if (data.oiRaw > 3 && Math.abs(data.divergenceVal) > 10) {
-                        title = "💣 CARICO ESPLOSIVO (Pre-Squeeze)";
-                        emoji = "🧨";
-                        desc = `Divergenza enorme (${data.divergenceVal.toFixed(1)}%). Si sta caricando una molla violenta.`;
+                    } else if (data.oiRaw > 3) {
+                        const divMod = Math.abs(data.divergenceVal);
+                        if (divMod > 10) {
+                            const direction = data.divergenceVal > 0 ? "RIBA" : "RIBA"; 
+                            const dirEmoji = data.divergenceVal > 0 ? "📈" : "📉";
+                            const side = data.divergenceVal > 0 ? "Long" : "Short";
+                            const victim = data.divergenceVal > 0 ? "Short" : "Long";
+
+                            title = `💣 CARICO ESPLOSIVO ${dirEmoji} (${side})`;
+                            emoji = "🧨";
+                            desc = `Divergenza enorme (${divMod.toFixed(1)}%). Le balene sono pesantemente ${side} mentre il retail è ${victim}. Si sta caricando uno squeeze ${direction}.`;
+                        } else {
+                            title = "📊 ACCUMULO DI TENSIONE";
+                            emoji = "⏳";
+                            desc = "L'Open Interest sale con volumi bassi. Il mercato accumula, ma la divergenza non è ancora netta.";
+                        }
                     }
 
                     if (!title) continue;
 
-                    const text = `<b>${emoji} ${title}</b>\n#${data.symbol} @ ${data.price}\n\n⭐ <b>Score: ${score}/10</b>\n⚡ <b>Quant Spec: ${data.specIndex}%</b>\n\n📝 <b>ANALISI:</b>\n<i>${desc}</i>\n\n👥 <b>DETTAGLI:</b>\n• Div: <code>${Math.abs(data.divergenceVal).toFixed(1)}% ${data.divergenceVal > 0 ? 'Bull' : 'Bear'}</code>\n• Book Ratio: <code>${data.obRatio.toFixed(2)}</code>\n• OI Change: <code>${data.oiPct}%</code>`;
+                    const text = `<b>${emoji} ${title}</b>\n#${data.symbol} @ ${data.price}\n\n⭐ <b>Score: ${score}/10</b>\n⚡ <b>Quant Spec: ${data.specIndex}%</b>\n\n📝 <b>ANALISI:</b>\n<i>${desc}</i>\n\n👥 <b>DETTAGLI:</b>\n• Div: <code>${Math.abs(data.divergenceVal).toFixed(1)}% ${data.divergenceVal > 0 ? 'Bull' : 'Bear'}</code>\n• Book Ratio: <code>${data.obRatio.toFixed(2)}</code>\n• OI Change: <code>${data.oiPct}%</code>\n• Funding: <code>${(data.fundingRaw * 100).toFixed(3)}%</code>`;
                     
-                    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "HTML" }).catch(()=>{});
+                    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { 
+                        chat_id: TELEGRAM_CHAT_ID, 
+                        text, 
+                        parse_mode: "HTML" 
+                    }).catch(()=>{});
                 }
             }
-            await sleep(700); 
+            await sleep(750); 
         }
     } catch (err) { console.error("Errore scan:", err.message); }
-    finally { isScanning = false; }
+    finally { isScanning = false; console.log("✅ Ciclo completato."); }
 }
 
 async function initialize() {
     try {
         const binInfo = await axios.get(`${BASE_BINANCE}/fapi/v1/exchangeInfo`);
         BINANCE_SYMBOLS = new Set(binInfo.data.symbols.filter(s => s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT').map(s => s.symbol));
-        console.log("Sniper v15.4 Online. Modalità Batch-Quant attiva.");
+        console.log("Sniper v15.5 Online. Direzione 'Carico' integrata.");
         scan(); setInterval(scan, SCAN_INTERVAL);
     } catch (e) { console.error("Errore inizializzazione:", e.message); }
 }
