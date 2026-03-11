@@ -11,8 +11,8 @@ const TELEGRAM_CHAT_ID   = '820279313';
 const P_HIGH  = 90;
 const P_LOW   = 10;
 const PERIOD  = '1h';
-const LIMIT   = 720;      
-const MIN_LIFE = 720;     
+const LIMIT   = 500;      
+const MIN_LIFE = 500;     
 const VOL_MIN = 2000000;  
 const SCAN_INTERVAL = 1000 * 60 * 50; 
 
