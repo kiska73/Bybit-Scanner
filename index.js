@@ -87,10 +87,6 @@ async function scan() {
                     signalType = "DIVERGENZA LONG"; side = "LONG";
                 } else if (whalePerc < P_LOW && retailPerc > P_HIGH) {
                     signalType = "DIVERGENZA SHORT"; side = "SHORT";
-                } else if (whalePerc < P_LOW && retailPerc < P_LOW) {
-                    signalType = "ESTREMO PANICO"; side = "LONG";
-                } else if (whalePerc > P_HIGH && retailPerc > P_HIGH) {
-                    signalType = "ESTREMO EUFORIA"; side = "SHORT";
                 }
 
                 if (signalType !== "") {
