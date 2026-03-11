@@ -1,51 +1,49 @@
 const axios = require('axios');
 
 // ==========================================================================
-// 🎯 SNIPER ELITE v30.0 - THE IRON GUARDIAN (Back to 30 Days Filter)
+// 🎯 SNIPER ELITE v32.1 - THE STEALTH HAMMER (Anti-Rate Limit / 50 Min)
 // ==========================================================================
 
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
 // --- CONFIGURAZIONE ---
-const P_HIGH  = 90;   
-const P_LOW   = 10;   
-const PERIOD  = '1h';     
-const LIMIT   = 720;      // Analisi su 720 ore (1 Mese)
-const MIN_LIFE = 720;     // 🚨 FILTRO RIGIDO: Almeno 30 giorni di storico
+const P_HIGH  = 90;
+const P_LOW   = 10;
+const PERIOD  = '1h';
+const LIMIT   = 720;      
+const MIN_LIFE = 720;     
 const VOL_MIN = 2000000;  
-const SCAN_INTERVAL = 1000 * 60 * 30;
+const SCAN_INTERVAL = 1000 * 60 * 50; 
 
 const BASE_BINANCE = "https://fapi.binance.com";
-const BATCH_SIZE = 10;
+const BATCH_SIZE = 5;      // Ridotto per sicurezza (più lento, più sicuro)
+const BATCH_DELAY = 2000;  // 2 secondi di pausa tra i blocchi
 
-let sentSignals = {};
 let scanning = false;
 
-// ==========================================================================
-// Funzione Percentile
-// ==========================================================================
+// Utility per la pausa
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 function calculatePercentile(current, history) {
     const values = history.map(h => parseFloat(h.longShortRatio));
-    const countBelow = values.filter(v => v < current).length;
+    const countBelow = values.filter(v => v <= current).length;
     return (countBelow / values.length) * 100;
 }
 
-// ==========================================================================
-// Motore di Scansione
-// ==========================================================================
 async function scan() {
     if (scanning) return;
     scanning = true;
 
     const startTime = Date.now();
+
     try {
+        console.log(`🚀 Scan "Stealth" avviato...`);
         const tickersRes = await axios.get(`${BASE_BINANCE}/fapi/v1/ticker/24hr`, { timeout: 10000 });
+
         const symbols = tickersRes.data
             .filter(t => parseFloat(t.quoteVolume) > VOL_MIN && t.symbol.endsWith('USDT'))
-            .sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume));
-
-        console.log(`🚀 Scan avviato su ${symbols.length} coppie (Filtro 30gg attivo)...`);
+            .sort((a,b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume));
 
         const premiumRes = await axios.get(`${BASE_BINANCE}/fapi/v1/premiumIndex`, { timeout: 10000 });
         const fundingMap = {};
@@ -53,13 +51,7 @@ async function scan() {
             fundingMap[f.symbol] = parseFloat(f.lastFundingRate);
         });
 
-        // Pulizia automatica dei segnali inviati (12h)
-        const now = Date.now();
-        Object.keys(sentSignals).forEach(sym => {
-            if (now - sentSignals[sym] > 1000 * 60 * 60 * 12) delete sentSignals[sym];
-        });
-
-        // Batch processing
+        // Elaborazione lenta e costante
         for (let i = 0; i < symbols.length; i += BATCH_SIZE) {
             const chunk = symbols.slice(i, i + BATCH_SIZE);
 
@@ -77,11 +69,12 @@ async function scan() {
                     }).catch(() => null)
                 ]);
 
-                // 🚨 IL FILTRO SALVA-VITA: Se mancano i 30gg (720 ore), scarta la coin
                 if (!topHist?.data || topHist.data.length < MIN_LIFE || !globHist?.data || globHist.data.length < MIN_LIFE) return;
 
                 const curWhaleRatio = parseFloat(topHist.data[topHist.data.length - 1].longShortRatio);
                 const curRetailRatio = parseFloat(globHist.data[globHist.data.length - 1].longShortRatio);
+
+                if (!curWhaleRatio || !curRetailRatio) return;
 
                 const whalePerc = calculatePercentile(curWhaleRatio, topHist.data);
                 const retailPerc = calculatePercentile(curRetailRatio, globHist.data);
@@ -90,41 +83,42 @@ async function scan() {
                 let signalType = "";
                 let side = "";
 
-                if (whalePerc > P_HIGH && retailPerc < P_LOW) { signalType = "DIVERGENZA LONG"; side = "LONG"; }
-                else if (whalePerc < P_LOW && retailPerc > P_HIGH) { signalType = "DIVERGENZA SHORT"; side = "SHORT"; }
-                else if (whalePerc < P_LOW && retailPerc < P_LOW) { signalType = "ESTREMO PANICO"; side = "LONG"; }
-                else if (whalePerc > P_HIGH && retailPerc > P_HIGH) { signalType = "ESTREMO EUFORIA"; side = "SHORT"; }
+                if (whalePerc > P_HIGH && retailPerc < P_LOW) {
+                    signalType = "DIVERGENZA LONG"; side = "LONG";
+                } else if (whalePerc < P_LOW && retailPerc > P_HIGH) {
+                    signalType = "DIVERGENZA SHORT"; side = "SHORT";
+                } else if (whalePerc < P_LOW && retailPerc < P_LOW) {
+                    signalType = "ESTREMO PANICO"; side = "LONG";
+                } else if (whalePerc > P_HIGH && retailPerc > P_HIGH) {
+                    signalType = "ESTREMO EUFORIA"; side = "SHORT";
+                }
 
                 if (signalType !== "") {
-                    const nowTS = Date.now();
-                    if (sentSignals[symbol] && (nowTS - sentSignals[symbol]) < 1000 * 60 * 60 * 6) return;
-                    sentSignals[symbol] = nowTS;
-
-                    let fundingEmoji = (side === "LONG") ? (funding <= 0.0001 ? "✅" : "❌") : (funding >= 0.0001 ? "✅" : "❌");
-                    const emoji = side === "LONG" ? "🚀" : "🩸";
-
-                    const text =
-                        `<b>${emoji} ${signalType} (1H)</b>\n` +
-                        `#${symbol} @ ${parseFloat(t.lastPrice)}\n\n` +
-                        `📊 <b>PERCENTILLA BINANCE (30gg):</b>\n` +
-                        `• 🐳 <b>Whales (Top 10):</b> <b>${whalePerc.toFixed(1)}%</b>\n` +
-                        `• 👥 <b>Retail (Holders):</b> <b>${retailPerc.toFixed(1)}%</b>\n\n` +
-                        `💸 <b>FUNDING:</b> <code>${(funding * 100).toFixed(4)}%</code> ${fundingEmoji}\n\n` +
-                        `🎯 <i>Check Bybit: se i valori sono allineati, entra!</i>`;
+                    let fundingEmoji = side === "LONG" ? (funding <= 0 ? "✅" : "❌") : (funding >= 0 ? "✅" : "❌");
+                    const text = `<b>${side === "LONG" ? "🚀" : "🩸"} ${signalType} (1H)</b>\n` +
+                                 `#${symbol} @ ${parseFloat(t.lastPrice)}\n\n` +
+                                 `📊 <b>PERCENTILLA (30gg):</b>\n` +
+                                 `• Whale: <b>${whalePerc.toFixed(1)}%</b>\n` +
+                                 `• Retail: <b>${retailPerc.toFixed(1)}%</b>\n\n` +
+                                 `💸 <b>FUNDING:</b> <code>${(funding*100).toFixed(4)}%</code> ${fundingEmoji}`;
 
                     await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
                         chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "HTML"
                     }).catch(() => {});
                 }
             }));
+
+            // Pausa tattica tra un blocco e l'altro per il Rate Limit
+            if (i + BATCH_SIZE < symbols.length) await sleep(BATCH_DELAY);
         }
-        console.log(`✅ Scan completato in ${((Date.now() - startTime) / 1000).toFixed(1)}s.`);
+
+        const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(`✅ Scan completato in ${duration}s su ${symbols.length} monete.`);
     } catch (e) {
         console.error("Errore Scan:", e.message);
     }
     scanning = false;
 }
 
-// Avvio
 setInterval(scan, SCAN_INTERVAL);
 scan();
