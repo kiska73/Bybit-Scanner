@@ -13,7 +13,7 @@ const P_LOW   = 5;
 const PERIOD  = '1h';
 const LIMIT   = 500;      
 const MIN_LIFE = 500;     
-const VOL_MIN = 2000000;  
+const VOL_MIN = 5000000;  
 const SCAN_INTERVAL = 1000 * 60 * 50; 
 
 const BASE_BINANCE = "https://fapi.binance.com";
