@@ -1,7 +1,7 @@
 const axios = require('axios');
 
 // ==========================================================================
-// 🎯 SNIPER ELITE v32.5 - ONLY FAVORABLE FUNDING
+// 🎯 SNIPER ELITE v32.6 - DIVERGENCE & CONCORDANCE (USD Weighted)
 // ==========================================================================
 
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
@@ -44,7 +44,7 @@ async function scan() {
     if (scanning) return;
     scanning = true;
 
-    console.log(`🚀 [${new Date().toLocaleTimeString()}] Scan in corso (Filtro Funding Attivo)...`);
+    console.log(`🚀 [${new Date().toLocaleTimeString()}] Scan in corso (Div + Concord)...`);
 
     try {
         const tickersRes = await axios.get(`${BASE_BINANCE}/fapi/v1/ticker/24hr`);
@@ -83,21 +83,26 @@ async function scan() {
                     let signalType = "";
                     let side = "";
 
+                    // 1. LOGICA DIVERGENZE (Contrarian)
                     if (whalePerc > P_HIGH && retailPerc < P_LOW) {
                         signalType = "DIVERGENZA LONG"; side = "LONG";
                     } else if (whalePerc < P_LOW && retailPerc > P_HIGH) {
                         signalType = "DIVERGENZA SHORT"; side = "SHORT";
                     }
+                    
+                    // 2. LOGICA CONCORDANZA (Trend Following) - NOVITÀ
+                    else if (whalePerc > P_HIGH && retailPerc > P_HIGH) {
+                        signalType = "CONCORDANZA LONG"; side = "LONG";
+                    } else if (whalePerc < P_LOW && retailPerc < P_LOW) {
+                        signalType = "CONCORDANZA SHORT"; side = "SHORT";
+                    }
 
                     if (signalType !== "") {
                         const funding = fundingMap[symbol] ?? 0;
-                        
-                        // --- FILTRO RIGIDO: PASSA SOLO SE IL FUNDING È A FAVORE ---
                         const isLongFavorable = (side === "LONG" && funding <= 0);
                         const isShortFavorable = (side === "SHORT" && funding >= 0);
 
                         if (isLongFavorable || isShortFavorable) {
-                            
                             let levaText = "";
                             if (oiRes?.data && supplyRes?.data?.data?.[0]) {
                                 const cs = parseFloat(supplyRes.data.data[0].circulatingSupply) || 0;
