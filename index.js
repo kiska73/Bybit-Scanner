@@ -1,20 +1,20 @@
 const axios = require('axios');
 
 // ==========================================================================
-// 🎯 SNIPER ELITE v32.3 - THE PRECISION HAMMER (USD Weighted)
+// 🎯 SNIPER ELITE v32.5 - ONLY FAVORABLE FUNDING
 // ==========================================================================
 
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
 const P_HIGH  = 90;
-const P_LOW   = 10;
+const P_LOW    = 10;
 const PERIOD  = '1h';
 const LIMIT   = 500;      
 const MIN_LIFE = 400;     
 const VOL_MIN = 5000000;  
 const SCAN_INTERVAL = 1000 * 60 * 50; 
-const OI_MC_THRESHOLD = 3.0; // % di Market Cap impegnata in OI direzionale
+const OI_MC_THRESHOLD = 3.0; 
 
 const BASE_BINANCE = "https://fapi.binance.com";
 const BASE_BINANCE_WEB = "https://www.binance.com";
@@ -44,7 +44,7 @@ async function scan() {
     if (scanning) return;
     scanning = true;
 
-    console.log(`🚀 [${new Date().toLocaleTimeString()}] Scan in corso (Metodo USD-Weighted)...`);
+    console.log(`🚀 [${new Date().toLocaleTimeString()}] Scan in corso (Filtro Funding Attivo)...`);
 
     try {
         const tickersRes = await axios.get(`${BASE_BINANCE}/fapi/v1/ticker/24hr`);
@@ -90,53 +90,46 @@ async function scan() {
                     }
 
                     if (signalType !== "") {
-                        let levaText = "";
                         const funding = fundingMap[symbol] ?? 0;
                         
-                        // --- CALCOLO PRECISO USD-WEIGHTED ---
-                        if (oiRes?.data && supplyRes?.data?.data?.[0]) {
-                            const cs = parseFloat(supplyRes.data.data[0].circulatingSupply) || 0;
-                            const oiContracts = parseFloat(oiRes.data.openInterest); 
+                        // --- FILTRO RIGIDO: PASSA SOLO SE IL FUNDING È A FAVORE ---
+                        const isLongFavorable = (side === "LONG" && funding <= 0);
+                        const isShortFavorable = (side === "SHORT" && funding >= 0);
+
+                        if (isLongFavorable || isShortFavorable) {
                             
-                            // Conversione in USD
-                            const oiUsd = oiContracts * currentPrice;
-                            const mcUsd = cs * currentPrice;
+                            let levaText = "";
+                            if (oiRes?.data && supplyRes?.data?.data?.[0]) {
+                                const cs = parseFloat(supplyRes.data.data[0].circulatingSupply) || 0;
+                                const oiUsd = parseFloat(oiRes.data.openInterest) * currentPrice;
+                                const mcUsd = cs * currentPrice;
 
-                            if (mcUsd > 0) {
-                                const retailLsr = curRetailRatio;
-                                const retailShortProp = 1 / (1 + retailLsr);
-                                const retailLongProp = retailLsr / (1 + retailLsr);
-                                
-                                let oiMcSide = 0;
-                                let type = "";
+                                if (mcUsd > 0) {
+                                    const retailLsr = curRetailRatio;
+                                    const retailShortProp = 1 / (1 + retailLsr);
+                                    const retailLongProp = retailLsr / (1 + retailLsr);
+                                    
+                                    let oiMcSide = (side === "LONG") 
+                                        ? ((oiUsd * retailShortProp) / mcUsd) * 100 
+                                        : ((oiUsd * retailLongProp) / mcUsd) * 100;
 
-                                if (side === "LONG") {
-                                    oiMcSide = ((oiUsd * retailShortProp) / mcUsd) * 100;
-                                    type = "Short";
-                                } else {
-                                    oiMcSide = ((oiUsd * retailLongProp) / mcUsd) * 100;
-                                    type = "Long";
-                                }
-
-                                if (oiMcSide > OI_MC_THRESHOLD) {
-                                    levaText = `🔥 <b>${type} Squeeze Pot.:</b> <code>${oiMcSide.toFixed(2)}%</code> della MC\n`;
+                                    if (oiMcSide > OI_MC_THRESHOLD) {
+                                        const type = side === "LONG" ? "Short" : "Long";
+                                        levaText = `🔥 <b>${type} Squeeze Pot.:</b> <code>${oiMcSide.toFixed(2)}%</code> della MC\n`;
+                                    }
                                 }
                             }
-                        } else if (!supplyRes?.data) {
-                            console.log(`⚠️ Supply missing for ${symbol} (WAF Block?)`);
+
+                            const msg = `<b>${side === "LONG" ? "🚀" : "🩸"} ${signalType}</b>\n` +
+                                         `#${symbol} @ ${currentPrice}\n\n` +
+                                         `📊 <b>PERCENTILI:</b>\n` +
+                                         `• Whales: <b>${whalePerc.toFixed(1)}%</b>\n` +
+                                         `• Retail: <b>${retailPerc.toFixed(1)}%</b>\n\n` +
+                                         `💸 <b>FUNDING:</b> <code>${(funding*100).toFixed(4)}%</code> ✅\n` +
+                                         levaText;
+
+                            await sendTelegram(msg);
                         }
-
-                        const fundingEmoji = side === "LONG" ? (funding <= 0 ? "✅" : "❌") : (funding >= 0 ? "✅" : "❌");
-                        
-                        const msg = `<b>${side === "LONG" ? "🚀" : "🩸"} ${signalType}</b>\n` +
-                                     `#${symbol} @ ${currentPrice}\n\n` +
-                                     `📊 <b>PERCENTILI:</b>\n` +
-                                     `• Whales: <b>${whalePerc.toFixed(1)}%</b>\n` +
-                                     `• Retail: <b>${retailPerc.toFixed(1)}%</b>\n\n` +
-                                     `💸 <b>FUNDING:</b> <code>${(funding*100).toFixed(4)}%</code> ${fundingEmoji}\n` +
-                                     levaText;
-
-                        await sendTelegram(msg);
                     }
                 } catch (e) { /* Skip moneta */ }
             }));
