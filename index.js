@@ -1,19 +1,23 @@
 const axios = require('axios');
 
 // ==========================================================================
-// 🎯 SNIPER ELITE v20.0 - THE PURE DAILY (Solo Percentilla & Funding)
+// 🎯 SNIPER ELITE v21.0 - THE FINAL GUARDIAN (1D - Min 30 Days History)
 // ==========================================================================
 
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
+// --- CONFIGURAZIONE RIGIDA ---
 const P_HIGH  = 90;   
 const P_LOW   = 10;   
+const MIN_DAYS = 30;    // Filtro: minimo 1 mese di vita della coin
+const VOL_MIN  = 10000000; // Volume minimo 10M USDT
 const SCAN_INTERVAL = 1000 * 60 * 60; // 1 ora
 
 const BASE_BINANCE = "https://fapi.binance.com";
 let sentSignals = {}; 
 
+// Funzione Percentilla Statistica
 function calculatePercentile(current, history) {
     const values = history.map(h => parseFloat(h.longAccount));
     const countBelow = values.filter(v => v < current).length;
@@ -21,9 +25,11 @@ function calculatePercentile(current, history) {
 }
 
 async function scan() {
+    console.log(`🚀 Scan DAILY in corso... (Filtro: min ${MIN_DAYS} giorni di storico)`);
     try {
         const tickersRes = await axios.get(`${BASE_BINANCE}/fapi/v1/ticker/24hr`);
-        const symbols = tickersRes.data.filter(t => parseFloat(t.quoteVolume) > 10000000 && t.symbol.endsWith('USDT'));
+        const symbols = tickersRes.data.filter(t => parseFloat(t.quoteVolume) > VOL_MIN && t.symbol.endsWith('USDT'));
+        
         const premiumRes = await axios.get(`${BASE_BINANCE}/fapi/v1/premiumIndex`);
         const fundingData = premiumRes.data;
 
@@ -35,7 +41,10 @@ async function scan() {
                 axios.get(`${BASE_BINANCE}/futures/data/globalLongShortAccountRatio`, { params: { symbol, period: '1d', limit: 500 } }).catch(()=>null)
             ]);
 
-            if (!topHist?.data?.length || !globHist?.data?.length) continue;
+            // --- PROTEZIONE DATI E STORICO MINIMO ---
+            if (!topHist?.data || topHist.data.length < MIN_DAYS || !globHist?.data || globHist.data.length < MIN_DAYS) {
+                continue; // Ignora coin troppo giovani o senza dati
+            }
 
             const curWhale = parseFloat(topHist.data[topHist.data.length - 1].longAccount);
             const curRetail = parseFloat(globHist.data[globHist.data.length - 1].longAccount);
@@ -49,7 +58,7 @@ async function scan() {
             let signalType = "";
             let side = "";
 
-            // LOGICA 90/10
+            // LOGICA FULCRO 90/10
             if (whalePerc > P_HIGH && retailPerc < P_LOW) { signalType = "DIVERGENZA LONG"; side = "LONG"; }
             else if (whalePerc < P_LOW && retailPerc > P_HIGH) { signalType = "DIVERGENZA SHORT"; side = "SHORT"; }
             else if (whalePerc < P_LOW && retailPerc < P_LOW) { signalType = "ESTREMO PANICO"; side = "LONG"; }
@@ -60,6 +69,7 @@ async function scan() {
                 if (sentSignals[symbol] && (now - sentSignals[symbol]) < 1000 * 60 * 60 * 12) continue;
                 sentSignals[symbol] = now;
 
+                // Semaforo Funding
                 let fundingEmoji = "⚪"; 
                 if (side === "LONG") {
                     fundingEmoji = funding <= 0.0001 ? "✅" : "❌"; 
@@ -70,7 +80,7 @@ async function scan() {
                 const emoji = side === "LONG" ? "🚀" : "🩸";
                 const text = `<b>${emoji} ${signalType} (1D)</b>\n` +
                              `#${symbol} @ ${parseFloat(t.lastPrice)}\n\n` +
-                             `📊 <b>PERCENTILLA (500 GIORNI):</b>\n` +
+                             `📊 <b>PERCENTILLA (${topHist.data.length} GIORNI):</b>\n` +
                              `• Whale: <b>${whalePerc.toFixed(1)}%</b>\n` +
                              `• Retail: <b>${retailPerc.toFixed(1)}%</b>\n\n` +
                              `💸 <b>FUNDING BINANCE:</b>\n` +
@@ -81,7 +91,8 @@ async function scan() {
                 }).catch(()=>{});
             }
         }
-    } catch (e) { console.error(e.message); }
+    } catch (e) { console.error("Errore Scan:", e.message); }
+    console.log("✅ Scan completato.");
 }
 
 setInterval(scan, SCAN_INTERVAL);
