@@ -8,8 +8,8 @@ const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
 // --- CONFIGURAZIONE ---
-const P_HIGH  = 95;
-const P_LOW   = 5;
+const P_HIGH  = 90;
+const P_LOW   = 10;
 const PERIOD  = '1h';
 const LIMIT   = 500;      
 const MIN_LIFE = 500;     
