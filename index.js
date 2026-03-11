@@ -1,23 +1,22 @@
 const axios = require('axios');
 
 // ==========================================================================
-// 🎯 SNIPER ELITE v21.0 - THE FINAL GUARDIAN (1D - Min 30 Days History)
+// 🎯 SNIPER ELITE v23.0 - THE 500H GUARDIAN (Min 500h History & 2M Vol)
 // ==========================================================================
 
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
-// --- CONFIGURAZIONE RIGIDA ---
+// --- CONFIGURAZIONE AGGIORNATA ---
 const P_HIGH  = 90;   
 const P_LOW   = 10;   
-const MIN_DAYS = 30;    // Filtro: minimo 1 mese di vita della coin
-const VOL_MIN  = 10000000; // Volume minimo 10M USDT
-const SCAN_INTERVAL = 1000 * 60 * 60; // 1 ora
+const MIN_HOURS = 500;    // Filtro: la moneta deve avere almeno 500 ore di storico
+const VOL_MIN  = 2000000; // Volume minimo 2M USDT
+const SCAN_INTERVAL = 1000 * 60 * 30; // Scan ogni 30 minuti
 
 const BASE_BINANCE = "https://fapi.binance.com";
 let sentSignals = {}; 
 
-// Funzione Percentilla Statistica
 function calculatePercentile(current, history) {
     const values = history.map(h => parseFloat(h.longAccount));
     const countBelow = values.filter(v => v < current).length;
@@ -25,7 +24,7 @@ function calculatePercentile(current, history) {
 }
 
 async function scan() {
-    console.log(`🚀 Scan DAILY in corso... (Filtro: min ${MIN_DAYS} giorni di storico)`);
+    console.log(`🚀 Scan 1H avviato... (Analisi su 500 ORE, Min Life 500h, Vol >2M)`);
     try {
         const tickersRes = await axios.get(`${BASE_BINANCE}/fapi/v1/ticker/24hr`);
         const symbols = tickersRes.data.filter(t => parseFloat(t.quoteVolume) > VOL_MIN && t.symbol.endsWith('USDT'));
@@ -37,13 +36,13 @@ async function scan() {
             const symbol = t.symbol;
 
             const [topHist, globHist] = await Promise.all([
-                axios.get(`${BASE_BINANCE}/futures/data/topLongShortPositionRatio`, { params: { symbol, period: '1d', limit: 500 } }).catch(()=>null),
-                axios.get(`${BASE_BINANCE}/futures/data/globalLongShortAccountRatio`, { params: { symbol, period: '1d', limit: 500 } }).catch(()=>null)
+                axios.get(`${BASE_BINANCE}/futures/data/topLongShortPositionRatio`, { params: { symbol, period: '1h', limit: 500 } }).catch(()=>null),
+                axios.get(`${BASE_BINANCE}/futures/data/globalLongShortAccountRatio`, { params: { symbol, period: '1h', limit: 500 } }).catch(()=>null)
             ]);
 
-            // --- PROTEZIONE DATI E STORICO MINIMO ---
-            if (!topHist?.data || topHist.data.length < MIN_DAYS || !globHist?.data || globHist.data.length < MIN_DAYS) {
-                continue; // Ignora coin troppo giovani o senza dati
+            // --- FILTRO SICUREZZA 500 ORE ---
+            if (!topHist?.data || topHist.data.length < MIN_HOURS || !globHist?.data || globHist.data.length < MIN_HOURS) {
+                continue;
             }
 
             const curWhale = parseFloat(topHist.data[topHist.data.length - 1].longAccount);
@@ -58,7 +57,7 @@ async function scan() {
             let signalType = "";
             let side = "";
 
-            // LOGICA FULCRO 90/10
+            // LOGICA 90/10 RIGIDA
             if (whalePerc > P_HIGH && retailPerc < P_LOW) { signalType = "DIVERGENZA LONG"; side = "LONG"; }
             else if (whalePerc < P_LOW && retailPerc > P_HIGH) { signalType = "DIVERGENZA SHORT"; side = "SHORT"; }
             else if (whalePerc < P_LOW && retailPerc < P_LOW) { signalType = "ESTREMO PANICO"; side = "LONG"; }
@@ -66,21 +65,15 @@ async function scan() {
 
             if (signalType !== "") {
                 const now = Date.now();
-                if (sentSignals[symbol] && (now - sentSignals[symbol]) < 1000 * 60 * 60 * 12) continue;
+                if (sentSignals[symbol] && (now - sentSignals[symbol]) < 1000 * 60 * 60 * 4) continue;
                 sentSignals[symbol] = now;
 
-                // Semaforo Funding
-                let fundingEmoji = "⚪"; 
-                if (side === "LONG") {
-                    fundingEmoji = funding <= 0.0001 ? "✅" : "❌"; 
-                } else {
-                    fundingEmoji = funding >= 0.0001 ? "✅" : "❌"; 
-                }
+                let fundingEmoji = (side === "LONG") ? (funding <= 0.0001 ? "✅" : "❌") : (funding >= 0.0001 ? "✅" : "❌");
 
                 const emoji = side === "LONG" ? "🚀" : "🩸";
-                const text = `<b>${emoji} ${signalType} (1D)</b>\n` +
+                const text = `<b>${emoji} ${signalType} (1H)</b>\n` +
                              `#${symbol} @ ${parseFloat(t.lastPrice)}\n\n` +
-                             `📊 <b>PERCENTILLA (${topHist.data.length} GIORNI):</b>\n` +
+                             `📊 <b>PERCENTILLA (500 ORE):</b>\n` +
                              `• Whale: <b>${whalePerc.toFixed(1)}%</b>\n` +
                              `• Retail: <b>${retailPerc.toFixed(1)}%</b>\n\n` +
                              `💸 <b>FUNDING BINANCE:</b>\n` +
@@ -91,8 +84,8 @@ async function scan() {
                 }).catch(()=>{});
             }
         }
-    } catch (e) { console.error("Errore Scan:", e.message); }
-    console.log("✅ Scan completato.");
+    } catch (e) { console.error("Errore:", e.message); }
+    console.log("✅ Scan terminato.");
 }
 
 setInterval(scan, SCAN_INTERVAL);
