@@ -1,120 +1,152 @@
 const axios = require('axios');
 
 // ==========================================================================
-// 🎯 SNIPER ELITE v32.1 - THE STEALTH HAMMER (Anti-Rate Limit / 50 Min)
+// 🎯 SNIPER ELITE v32.3 - THE PRECISION HAMMER (USD Weighted)
 // ==========================================================================
 
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
-// --- CONFIGURAZIONE ---
 const P_HIGH  = 90;
 const P_LOW   = 10;
 const PERIOD  = '1h';
 const LIMIT   = 500;      
-const MIN_LIFE = 500;     
-const VOL_MIN = 10000000;  
+const MIN_LIFE = 400;     
+const VOL_MIN = 5000000;  
 const SCAN_INTERVAL = 1000 * 60 * 50; 
+const OI_MC_THRESHOLD = 3.0; // % di Market Cap impegnata in OI direzionale
 
 const BASE_BINANCE = "https://fapi.binance.com";
-const BATCH_SIZE = 5;      // Ridotto per sicurezza (più lento, più sicuro)
-const BATCH_DELAY = 2000;  // 2 secondi di pausa tra i blocchi
+const BASE_BINANCE_WEB = "https://www.binance.com";
+const BATCH_SIZE = 3;      
+const BATCH_DELAY = 3000;  
 
 let scanning = false;
 
-// Utility per la pausa
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 function calculatePercentile(current, history) {
+    if (!history || history.length === 0) return 50;
     const values = history.map(h => parseFloat(h.longShortRatio));
     const countBelow = values.filter(v => v <= current).length;
     return (countBelow / values.length) * 100;
+}
+
+async function sendTelegram(text) {
+    try {
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "HTML"
+        });
+    } catch (e) { console.error("❌ Telegram Error"); }
 }
 
 async function scan() {
     if (scanning) return;
     scanning = true;
 
-    const startTime = Date.now();
+    console.log(`🚀 [${new Date().toLocaleTimeString()}] Scan in corso (Metodo USD-Weighted)...`);
 
     try {
-        console.log(`🚀 Scan "Stealth" avviato...`);
-        const tickersRes = await axios.get(`${BASE_BINANCE}/fapi/v1/ticker/24hr`, { timeout: 10000 });
-
+        const tickersRes = await axios.get(`${BASE_BINANCE}/fapi/v1/ticker/24hr`);
         const symbols = tickersRes.data
             .filter(t => parseFloat(t.quoteVolume) > VOL_MIN && t.symbol.endsWith('USDT'))
             .sort((a,b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume));
 
-        const premiumRes = await axios.get(`${BASE_BINANCE}/fapi/v1/premiumIndex`, { timeout: 10000 });
+        const premiumRes = await axios.get(`${BASE_BINANCE}/fapi/v1/premiumIndex`);
         const fundingMap = {};
-        premiumRes.data.forEach(f => {
-            fundingMap[f.symbol] = parseFloat(f.lastFundingRate);
-        });
+        premiumRes.data.forEach(f => { fundingMap[f.symbol] = parseFloat(f.lastFundingRate); });
 
-        // Elaborazione lenta e costante
         for (let i = 0; i < symbols.length; i += BATCH_SIZE) {
             const chunk = symbols.slice(i, i + BATCH_SIZE);
 
             await Promise.all(chunk.map(async (t) => {
                 const symbol = t.symbol;
+                const asset = symbol.replace('USDT', '');
+                const currentPrice = parseFloat(t.lastPrice);
 
-                const [topHist, globHist] = await Promise.all([
-                    axios.get(`${BASE_BINANCE}/futures/data/topLongShortPositionRatio`, {
-                        params: { symbol, period: PERIOD, limit: LIMIT },
-                        timeout: 10000
-                    }).catch(() => null),
-                    axios.get(`${BASE_BINANCE}/futures/data/globalLongShortAccountRatio`, {
-                        params: { symbol, period: PERIOD, limit: LIMIT },
-                        timeout: 10000
-                    }).catch(() => null)
-                ]);
+                try {
+                    const [topHist, globHist, oiRes, supplyRes] = await Promise.all([
+                        axios.get(`${BASE_BINANCE}/futures/data/topLongShortPositionRatio`, { params: { symbol, period: PERIOD, limit: LIMIT } }).catch(() => null),
+                        axios.get(`${BASE_BINANCE}/futures/data/globalLongShortAccountRatio`, { params: { symbol, period: PERIOD, limit: LIMIT } }).catch(() => null),
+                        axios.get(`${BASE_BINANCE}/fapi/v1/openInterest`, { params: { symbol } }).catch(() => null),
+                        axios.get(`${BASE_BINANCE_WEB}/bapi/composite/v1/public/marketing/tradingPair/detail?symbol=${asset.toLowerCase()}`).catch(() => null)
+                    ]);
 
-                if (!topHist?.data || topHist.data.length < MIN_LIFE || !globHist?.data || globHist.data.length < MIN_LIFE) return;
+                    if (!topHist?.data || topHist.data.length < MIN_LIFE || !globHist?.data || globHist.data.length < MIN_LIFE) return;
 
-                const curWhaleRatio = parseFloat(topHist.data[topHist.data.length - 1].longShortRatio);
-                const curRetailRatio = parseFloat(globHist.data[globHist.data.length - 1].longShortRatio);
+                    const curWhaleRatio = parseFloat(topHist.data[topHist.data.length - 1].longShortRatio);
+                    const curRetailRatio = parseFloat(globHist.data[globHist.data.length - 1].longShortRatio);
 
-                if (!curWhaleRatio || !curRetailRatio) return;
+                    const whalePerc = calculatePercentile(curWhaleRatio, topHist.data);
+                    const retailPerc = calculatePercentile(curRetailRatio, globHist.data);
 
-                const whalePerc = calculatePercentile(curWhaleRatio, topHist.data);
-                const retailPerc = calculatePercentile(curRetailRatio, globHist.data);
+                    let signalType = "";
+                    let side = "";
 
-                const funding = fundingMap[symbol] ?? 0;
-                let signalType = "";
-                let side = "";
+                    if (whalePerc > P_HIGH && retailPerc < P_LOW) {
+                        signalType = "DIVERGENZA LONG"; side = "LONG";
+                    } else if (whalePerc < P_LOW && retailPerc > P_HIGH) {
+                        signalType = "DIVERGENZA SHORT"; side = "SHORT";
+                    }
 
-                if (whalePerc > P_HIGH && retailPerc < P_LOW) {
-                    signalType = "DIVERGENZA LONG"; side = "LONG";
-                } else if (whalePerc < P_LOW && retailPerc > P_HIGH) {
-                    signalType = "DIVERGENZA SHORT"; side = "SHORT";
-                }
+                    if (signalType !== "") {
+                        let levaText = "";
+                        const funding = fundingMap[symbol] ?? 0;
+                        
+                        // --- CALCOLO PRECISO USD-WEIGHTED ---
+                        if (oiRes?.data && supplyRes?.data?.data?.[0]) {
+                            const cs = parseFloat(supplyRes.data.data[0].circulatingSupply) || 0;
+                            const oiContracts = parseFloat(oiRes.data.openInterest); 
+                            
+                            // Conversione in USD
+                            const oiUsd = oiContracts * currentPrice;
+                            const mcUsd = cs * currentPrice;
 
-                if (signalType !== "") {
-                    let fundingEmoji = side === "LONG" ? (funding <= 0 ? "✅" : "❌") : (funding >= 0 ? "✅" : "❌");
-                    const text = `<b>${side === "LONG" ? "🚀" : "🩸"} ${signalType} (1H)</b>\n` +
-                                 `#${symbol} @ ${parseFloat(t.lastPrice)}\n\n` +
-                                 `📊 <b>PERCENTILLA (30gg):</b>\n` +
-                                 `• Whale: <b>${whalePerc.toFixed(1)}%</b>\n` +
-                                 `• Retail: <b>${retailPerc.toFixed(1)}%</b>\n\n` +
-                                 `💸 <b>FUNDING:</b> <code>${(funding*100).toFixed(4)}%</code> ${fundingEmoji}`;
+                            if (mcUsd > 0) {
+                                const retailLsr = curRetailRatio;
+                                const retailShortProp = 1 / (1 + retailLsr);
+                                const retailLongProp = retailLsr / (1 + retailLsr);
+                                
+                                let oiMcSide = 0;
+                                let type = "";
 
-                    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-                        chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "HTML"
-                    }).catch(() => {});
-                }
+                                if (side === "LONG") {
+                                    oiMcSide = ((oiUsd * retailShortProp) / mcUsd) * 100;
+                                    type = "Short";
+                                } else {
+                                    oiMcSide = ((oiUsd * retailLongProp) / mcUsd) * 100;
+                                    type = "Long";
+                                }
+
+                                if (oiMcSide > OI_MC_THRESHOLD) {
+                                    levaText = `🔥 <b>${type} Squeeze Pot.:</b> <code>${oiMcSide.toFixed(2)}%</code> della MC\n`;
+                                }
+                            }
+                        } else if (!supplyRes?.data) {
+                            console.log(`⚠️ Supply missing for ${symbol} (WAF Block?)`);
+                        }
+
+                        const fundingEmoji = side === "LONG" ? (funding <= 0 ? "✅" : "❌") : (funding >= 0 ? "✅" : "❌");
+                        
+                        const msg = `<b>${side === "LONG" ? "🚀" : "🩸"} ${signalType}</b>\n` +
+                                     `#${symbol} @ ${currentPrice}\n\n` +
+                                     `📊 <b>PERCENTILI:</b>\n` +
+                                     `• Whales: <b>${whalePerc.toFixed(1)}%</b>\n` +
+                                     `• Retail: <b>${retailPerc.toFixed(1)}%</b>\n\n` +
+                                     `💸 <b>FUNDING:</b> <code>${(funding*100).toFixed(4)}%</code> ${fundingEmoji}\n` +
+                                     levaText;
+
+                        await sendTelegram(msg);
+                    }
+                } catch (e) { /* Skip moneta */ }
             }));
 
-            // Pausa tattica tra un blocco e l'altro per il Rate Limit
             if (i + BATCH_SIZE < symbols.length) await sleep(BATCH_DELAY);
         }
-
-        const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-        console.log(`✅ Scan completato in ${duration}s su ${symbols.length} monete.`);
-    } catch (e) {
-        console.error("Errore Scan:", e.message);
-    }
+        console.log(`✅ Scan Terminato.`);
+    } catch (e) { console.error("🔴 Errore:", e.message); }
     scanning = false;
 }
 
-setInterval(scan, SCAN_INTERVAL);
 scan();
+setInterval(scan, SCAN_INTERVAL);
