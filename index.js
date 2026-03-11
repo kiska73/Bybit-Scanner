@@ -1,7 +1,7 @@
 const axios = require('axios');
 
 // ==========================================================================
-// SNIPER ELITE v16.3 - THE LEGEND (Percentile 92/8 + Bybit Alignment)
+// SNIPER ELITE v16.6 - ELITE QUANT (Percentile + OI/MC + Funding Bias)
 // ==========================================================================
 
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
@@ -11,7 +11,6 @@ const SCAN_INTERVAL = 1000 * 60 * 45;
 const BASE_BYBIT   = "https://api.bybit.com";
 const BASE_BINANCE = "https://fapi.binance.com";
 
-// Funzione per calcolare la Percentile su 500 ore
 function calculatePercentile(current, history) {
     const values = history.map(h => parseFloat(h.longAccount));
     const min = Math.min(...values);
@@ -21,55 +20,76 @@ function calculatePercentile(current, history) {
 }
 
 async function scan() {
-    console.log("🚀 Analisi Percentile 500h in corso...");
+    console.log("🎯 Sniper Elite Quant: Analisi in corso...");
     try {
         const tickersRes = await axios.get(`${BASE_BYBIT}/v5/market/tickers`, { params: { category: 'linear' } });
+        // Filtriamo per volume minimo 5M per evitare "shitcoin" senza liquidità
         const symbols = tickersRes.data.result.list.filter(t => parseFloat(t.turnover24h) > 5000000);
 
         for (const t of symbols) {
             const symbol = t.symbol;
 
-            // 1. Scarico Storico 500 ore da Binance per Whale e Retail
-            const [topHist, globHist, bybitRatioResp] = await Promise.all([
+            const [topHist, globHist, bybitRatioResp, oiResp, coinInfo] = await Promise.all([
                 axios.get(`${BASE_BINANCE}/futures/data/topLongShortPositionRatio`, { params: { symbol, period: '1h', limit: 500 } }).catch(()=>null),
                 axios.get(`${BASE_BINANCE}/futures/data/globalLongShortAccountRatio`, { params: { symbol, period: '1h', limit: 500 } }).catch(()=>null),
-                axios.get(`${BASE_BYBIT}/v5/market/account-ratio`, { params: { category: 'linear', symbol, period: '1h', limit: 1 } }).catch(()=>null)
+                axios.get(`${BASE_BYBIT}/v5/market/account-ratio`, { params: { category: 'linear', symbol, period: '1h', limit: 1 } }).catch(()=>null),
+                axios.get(`${BASE_BYBIT}/v5/market/open-interest`, { params: { category: 'linear', symbol, intervalTime: '1h', limit: 4 } }).catch(()=>null),
+                axios.get(`${BASE_BYBIT}/v5/market/instruments-info`, { params: { category: 'linear', symbol } }).catch(()=>null)
             ]);
 
-            if (!topHist?.data || !globHist?.data || !bybitRatioResp?.data?.result?.list?.[0]) continue;
+            if (!topHist?.data?.length || !globHist?.data?.length || !bybitRatioResp?.data?.result?.list?.[0] || !oiResp?.data?.result?.list?.length) continue;
 
-            // Dati attuali
-            const currentWhale = parseFloat(topHist.data[topHist.data.length - 1].longAccount);
-            const currentRetail = parseFloat(globHist.data[globHist.data.length - 1].longAccount);
+            // 1. Dati Binance & Percentile
+            const currentWhaleRatio = parseFloat(topHist.data[topHist.data.length - 1].longAccount);
+            const currentRetailRatio = parseFloat(globHist.data[globHist.data.length - 1].longAccount);
+            const whalePerc = calculatePercentile(currentWhaleRatio, topHist.data);
             
-            // Calcolo Percentile
-            const whalePerc = calculatePercentile(currentWhale, topHist.data);
-            const retailPerc = calculatePercentile(currentRetail, globHist.data);
+            // 2. Analisi OI & OI/MC (Bybit)
+            const oiList = oiResp.data.result.list;
+            const currentOiValue = parseFloat(oiList[0].openInterest) * parseFloat(t.lastPrice);
+            const prevOi = parseFloat(oiList[oiList.length - 1].openInterest);
+            const oiChangePct = ((parseFloat(oiList[0].openInterest) - prevOi) / prevOi) * 100;
+            
+            // Nota: Market Cap reale è difficile da API per tutte, usiamo il Volume 24h come proxy di liquidità o un ratio OI/Vol
+            const oiVolRatio = (currentOiValue / parseFloat(t.turnover24h)) * 100;
 
-            const whaleLongPct = currentWhale * 100;
-            const retailLongPct = currentRetail * 100;
-            const binDiv = whaleLongPct - retailLongPct;
+            // 3. Dati Bybit Sentiment & Funding
+            const bybitLongPct = parseFloat(bybitRatioResp.data.result.list[0].buyRatio) * 100;
+            const funding = parseFloat(t.fundingRate);
 
-            const bybitRatio = parseFloat(bybitRatioResp.data.result.list[0].buyRatio);
-            const bybitLongPct = (bybitRatio * 100);
+            // --- TRIGGER LOGIC ---
+            const isLongSignal = whalePerc > 92;
+            const isShortSignal = whalePerc < 8;
+            const bybitConfirms = isLongSignal ? bybitLongPct > 50 : bybitLongPct < 50;
 
-            // --- FILTRO SUPREMO: PERCENTILE 92/8 + ALLINEAMENTO ---
-            const isWhaleExtreme = whalePerc > 92 || whalePerc < 8;
-            const isAligned = (binDiv > 0 && bybitRatio > 0.51) || (binDiv < 0 && bybitRatio < 0.49);
-
-            if (isWhaleExtreme && isAligned && Math.abs(binDiv) > 12) {
+            if ((isLongSignal || isShortSignal) && bybitConfirms) {
                 
-                const side = binDiv > 0 ? "LONG" : "SHORT";
-                const directionEmoji = binDiv > 0 ? "📈" : "📉";
-                const condition = whalePerc > 92 ? "ACCUMULO MASSIMO" : "DISTRIBUZIONE MASSIMA";
+                // --- CALCOLO SCORE QUALITÀ (Max 10) ---
+                let score = 5;
+                if (oiChangePct > 2) score += 1;
+                if (oiChangePct > 5) score += 1;
+                
+                // Bonus Funding (Se remano contro il movimento = Squeeze probabile)
+                if (isLongSignal && funding < 0) score += 2; // Whales Long + Retail paga per Shortare = 🚀
+                if (isShortSignal && funding > 0.0005) score += 2; // Whales Short + Retail paga per Longare = 🩸
+                
+                // Bonus Tensione (OI/Vol Ratio)
+                if (oiVolRatio > 20) score += 1; // Alta leva rispetto agli scambi
 
-                const text = `<b>🧨 💣 CARICO ESPLOSIVO ${directionEmoji}</b>\n#${symbol} @ ${t.lastPrice}\n\n` +
-                             `📝 <b>ANALISI 500H:</b>\n<i>Situazione di ${condition}. La percentile delle balene è al <b>${whalePerc.toFixed(1)}%</b>. Binance e Bybit sono allineati per un movimento ${side}.</i>\n\n` +
-                             `🐳 <b>WHALE (Bin):</b> <code>${whaleLongPct.toFixed(1)}%</code> (Perc: ${whalePerc.toFixed(1)}%)\n` +
-                             `👥 <b>RETAIL (Bin):</b> <code>${retailLongPct.toFixed(1)}%</code>\n` +
-                             `📊 <b>BYBIT LONG:</b> <code>${bybitLongPct.toFixed(1)}%</code>\n\n` +
-                             `✅ <b>CONFERMA CROSS-EXCHANGE OK</b>\n` +
-                             `💸 <b>FUNDING:</b> <code>${(parseFloat(t.fundingRate)*100).toFixed(3)}%</code>`;
+                const side = isLongSignal ? "LONG" : "SHORT";
+                const emoji = isLongSignal ? "🚀" : "🩸";
+
+                const text = `<b>${emoji} CARICO ESPLOSIVO ${side}</b>\n#${symbol} @ ${t.lastPrice}\n\n` +
+                             `⭐ <b>SCORE QUALITÀ: ${score}/10</b>\n` +
+                             `📊 <b>PERCENTILE 500H:</b> <code>${whalePerc.toFixed(1)}%</code>\n\n` +
+                             `🔥 <b>DATI QUANT:</b>\n` +
+                             `• OI Change (4h): <code>${oiChangePct > 0 ? '📈' : '📉'} ${oiChangePct.toFixed(2)}%</code>\n` +
+                             `• OI/Vol Ratio: <code>${oiVolRatio.toFixed(1)}%</code>\n` +
+                             `• Funding: <code>${(funding * 100).toFixed(4)}%</code>\n\n` +
+                             `👥 <b>SENTIMENT:</b>\n` +
+                             `• Whales (Bin): <code>${(currentWhaleRatio * 100).toFixed(1)}%</code>\n` +
+                             `• Bybit Sentiment: <code>${bybitLongPct.toFixed(1)}% Long</code>\n\n` +
+                             `✅ <b>ALLINEAMENTO CROSS-EXCHANGE OK</b>`;
 
                 await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { 
                     chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "HTML" 
@@ -77,7 +97,7 @@ async function scan() {
             }
         }
     } catch (e) { console.error("Errore:", e.message); }
-    console.log("✅ Ciclo Percentile completato.");
+    console.log("✅ Ciclo Elite completato.");
 }
 
 setInterval(scan, SCAN_INTERVAL);
