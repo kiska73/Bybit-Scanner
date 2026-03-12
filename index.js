@@ -15,7 +15,7 @@ const MIN_LIFE = 400;
 const VOL_MIN = 10000000;  
 const SCAN_INTERVAL = 1000 * 60 * 50; 
 const OI_MC_THRESHOLD = 3.0; 
-const MIN_FUNDING_THRESHOLD = 0.0001; // Corrisponde allo 0.01% (Binance usa decimali)
+const MIN_FUNDING_THRESHOLD = 0.0005; // Corrisponde allo 0.05% (Binance usa decimali)
 
 const BASE_BINANCE = "https://fapi.binance.com";
 const BASE_BINANCE_WEB = "https://www.binance.com";
