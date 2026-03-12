@@ -12,7 +12,7 @@ const P_LOW    = 10;
 const PERIOD  = '1h';
 const LIMIT   = 500;      
 const MIN_LIFE = 400;     
-const VOL_MIN = 5000000;  
+const VOL_MIN = 10000000;  
 const SCAN_INTERVAL = 1000 * 60 * 50; 
 const OI_MC_THRESHOLD = 3.0; 
 
