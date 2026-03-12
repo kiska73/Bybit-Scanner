@@ -1,7 +1,7 @@
 const axios = require('axios');
 
 // ==========================================================================
-// 🎯 SNIPER ELITE v32.6 - DIVERGENCE & CONCORDANCE (USD Weighted)
+// 🎯 SNIPER ELITE v32.7 - HIGH CONVICTION (Funding > |0.01%|)
 // ==========================================================================
 
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
@@ -15,6 +15,7 @@ const MIN_LIFE = 400;
 const VOL_MIN = 10000000;  
 const SCAN_INTERVAL = 1000 * 60 * 50; 
 const OI_MC_THRESHOLD = 3.0; 
+const MIN_FUNDING_THRESHOLD = 0.0001; // Corrisponde allo 0.01% (Binance usa decimali)
 
 const BASE_BINANCE = "https://fapi.binance.com";
 const BASE_BINANCE_WEB = "https://www.binance.com";
@@ -44,7 +45,7 @@ async function scan() {
     if (scanning) return;
     scanning = true;
 
-    console.log(`🚀 [${new Date().toLocaleTimeString()}] Scan in corso (Div + Concord)...`);
+    console.log(`🚀 [${new Date().toLocaleTimeString()}] Scan in corso (Filtro Funding > 0.01%)...`);
 
     try {
         const tickersRes = await axios.get(`${BASE_BINANCE}/fapi/v1/ticker/24hr`);
@@ -83,14 +84,11 @@ async function scan() {
                     let signalType = "";
                     let side = "";
 
-                    // 1. LOGICA DIVERGENZE (Contrarian)
                     if (whalePerc > P_HIGH && retailPerc < P_LOW) {
                         signalType = "DIVERGENZA LONG"; side = "LONG";
                     } else if (whalePerc < P_LOW && retailPerc > P_HIGH) {
                         signalType = "DIVERGENZA SHORT"; side = "SHORT";
                     }
-                    
-                    // 2. LOGICA CONCORDANZA (Trend Following) - NOVITÀ
                     else if (whalePerc > P_HIGH && retailPerc > P_HIGH) {
                         signalType = "CONCORDANZA LONG"; side = "LONG";
                     } else if (whalePerc < P_LOW && retailPerc < P_LOW) {
@@ -99,8 +97,13 @@ async function scan() {
 
                     if (signalType !== "") {
                         const funding = fundingMap[symbol] ?? 0;
-                        const isLongFavorable = (side === "LONG" && funding <= 0);
-                        const isShortFavorable = (side === "SHORT" && funding >= 0);
+                        
+                        // --- NUOVO FILTRO FUNDING QUANTITATIVO (|F| >= 0.01%) ---
+                        const isFundingSignificant = Math.abs(funding) >= MIN_FUNDING_THRESHOLD;
+                        
+                        // --- FILTRO DIREZIONALE (A FAVORE) ---
+                        const isLongFavorable = (side === "LONG" && funding <= -MIN_FUNDING_THRESHOLD);
+                        const isShortFavorable = (side === "SHORT" && funding >= MIN_FUNDING_THRESHOLD);
 
                         if (isLongFavorable || isShortFavorable) {
                             let levaText = "";
@@ -130,7 +133,7 @@ async function scan() {
                                          `📊 <b>PERCENTILI:</b>\n` +
                                          `• Whales: <b>${whalePerc.toFixed(1)}%</b>\n` +
                                          `• Retail: <b>${retailPerc.toFixed(1)}%</b>\n\n` +
-                                         `💸 <b>FUNDING:</b> <code>${(funding*100).toFixed(4)}%</code> ✅\n` +
+                                         `💸 <b>FUNDING:</b> <code>${(funding*100).toFixed(4)}%</code> ⚡\n` +
                                          levaText;
 
                             await sendTelegram(msg);
