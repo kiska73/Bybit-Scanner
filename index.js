@@ -1,7 +1,7 @@
 const axios = require('axios');
 
 // ==========================================================================
-// 🎯 SNIPER ELITE v33.4 - ALL-IN-ONE COMPACT (Bybit + Binance)
+// 🎯 SNIPER ELITE v33.6 - FULL INFO MODE (✅/❌ Status)
 // ==========================================================================
 
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
@@ -59,29 +59,32 @@ async function scan() {
 
                     if (!topHist?.data || !globHist?.data) return;
 
-                    const curWhaleB = parseFloat(topHist.data[topHist.data.length - 1].longShortRatio);
-                    const curRetailB = parseFloat(globHist.data[globHist.data.length - 1].longShortRatio);
+                    const whaleRatioB = parseFloat(topHist.data[topHist.data.length - 1].longShortRatio);
+                    const retailRatioB = parseFloat(globHist.data[globHist.data.length - 1].longShortRatio);
                     
-                    let side = "";
-                    if (curWhaleB > 1.2 && curRetailB < 0.8) side = "LONG";
-                    else if (curWhaleB < 0.8 && curRetailB > 1.2) side = "SHORT";
-                    else if (curWhaleB > 1.1 && curRetailB > 1.1) side = "LONG";
-                    else if (curWhaleB < 0.9 && curRetailB < 0.9) side = "SHORT";
+                    const whalePerc = ((topHist.data.filter(h => parseFloat(h.longShortRatio) <= whaleRatioB).length) / topHist.data.length) * 100;
+                    const retailPerc = ((globHist.data.filter(h => parseFloat(h.longShortRatio) <= retailRatioB).length) / globHist.data.length) * 100;
+
+                    let signalType = ""; let side = "";
+                    if (whalePerc > 90 && retailPerc < 10) { signalType = "DIVERGENZA LONG"; side = "LONG"; }
+                    else if (whalePerc < 10 && retailPerc > 90) { signalType = "DIVERGENZA SHORT"; side = "SHORT"; }
+                    else if (whalePerc > 90 && retailPerc > 90) { signalType = "CONCORDANZA LONG"; side = "LONG"; }
+                    else if (whalePerc < 10 && retailPerc < 10) { signalType = "CONCORDANZA SHORT"; side = "SHORT"; }
 
                     if (side !== "") {
                         const funding = fundingMap[symbol] ?? 0;
                         if ((side === "LONG" && funding <= -MIN_FUNDING_THRESHOLD) || (side === "SHORT" && funding >= MIN_FUNDING_THRESHOLD)) {
                             
-                            // 1. WHALES BYBIT (Dato integrato)
-                            let whaleBybit = "N.D.";
+                            // Dati Informativi Bybit Whales
+                            let whaleBybitLine = "";
                             if (bybitWhaleRes?.data?.result?.list?.[0]) {
                                 const bRatio = parseFloat(bybitWhaleRes.data.result.list[0].buySellRatio);
-                                const isAligned = (side === "LONG" && bRatio > 1.0) || (side === "SHORT" && bRatio < 1.0);
-                                whaleBybit = `<b>${bRatio.toFixed(2)}:1</b> ${isAligned ? "✅" : "❌"}`;
+                                const ok = (side === "LONG" && bRatio > 1.0) || (side === "SHORT" && bRatio < 1.0);
+                                whaleBybitLine = `🐋 <b>Whales Bybit:</b> <code>${bRatio.toFixed(2)}:1</code> ${ok ? "✅" : "❌"}\n`;
                             }
 
-                            // 2. SQUEEZE POTENTIAL
-                            let oiInfo = "";
+                            // Dati Informativi Squeeze
+                            let squeezeLine = "";
                             let supply = MANUAL_SUPPLY[asset] || 0;
                             if (supply === 0) {
                                 const sRes = await axios.get(`https://www.binance.com/bapi/composite/v1/public/marketing/tradingPair/detail?symbol=${asset.toLowerCase()}`).catch(() => null);
@@ -92,17 +95,18 @@ async function scan() {
                                 const oiUsd = parseFloat(bybitOIRes.data.result.list[0].openInterest) * currentPrice;
                                 const mcUsd = supply * currentPrice;
                                 const ratio = (oiUsd / mcUsd) * 100;
-                                const fuel = (side === "LONG") ? (ratio * (1/(1+curRetailB))) : (ratio * (curRetailB/(1+curRetailB)));
-                                oiInfo = `\n📊 <b>OI/MC Bybit:</b> <code>${ratio.toFixed(2)}%</code>\n` +
-                                         `🔥 <b>Squeeze.:</b> <code>${fuel.toFixed(2)}%</code> ${fuel >= SQUEEZE_THRESHOLD ? "✅" : "❌"}`;
+                                const fuel = (side === "LONG") ? (ratio * (1/(1+retailRatioB))) : (ratio * (retailRatioB/(1+retailRatioB)));
+                                squeezeLine = `📊 <b>OI/MC Bybit:</b> <code>${ratio.toFixed(2)}%</code>\n` +
+                                              `🔥 <b>Squeeze Pot.:</b> <code>${fuel.toFixed(2)}%</code> ${fuel >= SQUEEZE_THRESHOLD ? "✅" : "❌"}`;
                             }
 
-                            // MESSAGGIO UNICO COMPATTO
-                            const msg = `<b>${side === "LONG" ? "🚀" : "🩸"} SEGNALE ${side}</b>\n` +
+                            const msg = `<b>${side === "LONG" ? "🚀" : "🩸"} ${signalType}</b>\n` +
                                          `#${symbol} @ ${currentPrice}\n\n` +
-                                         `🐋 <b>Whales Bybit:</b> ${whaleBybit}\n` +
-                                         `💸 <b>Funding:</b> <code>${(funding*100).toFixed(4)}%</code> ⚡` +
-                                         oiInfo;
+                                         `📊 <b>PERCENTILI (Binance):</b>\n` +
+                                         `• Whales: <b>${whalePerc.toFixed(1)}%</b>\n` +
+                                         `• Retail: <b>${retailPerc.toFixed(1)}%</b>\n\n` +
+                                         `💸 <b>FUNDING:</b> <code>${(funding*100).toFixed(4)}%</code> ⚡\n` +
+                                         whaleBybitLine + squeezeLine;
 
                             await sendTelegram(msg);
                         }
