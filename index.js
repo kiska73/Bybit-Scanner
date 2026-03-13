@@ -1,7 +1,7 @@
 const axios = require('axios');
 
 // ==========================================================================
-// 🎯 SNIPER ELITE v33.7 - FINAL STABLE (Fix NaN & Bybit Ratio)
+// 🎯 SNIPER ELITE v33.8 - FINAL STABLE (Fix Bybit Whale Ratio & Position)
 // ==========================================================================
 
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
@@ -50,11 +50,12 @@ async function scan() {
                 const currentPrice = parseFloat(t.lastPrice);
 
                 try {
+                    // Endpoint Bybit aggiornato a position-ratio per replicare lo screenshot
                     const [topHist, globHist, bybitOIRes, bybitWhaleRes] = await Promise.all([
                         axios.get(`${BASE_BINANCE}/futures/data/topLongShortPositionRatio`, { params: { symbol, period: '1h', limit: 500 } }).catch(() => null),
                         axios.get(`${BASE_BINANCE}/futures/data/globalLongShortAccountRatio`, { params: { symbol, period: '1h', limit: 500 } }).catch(() => null),
                         axios.get(`${BASE_BYBIT}/v5/market/open-interest`, { params: { category: 'linear', symbol: symbol, intervalTime: '1h' } }).catch(() => null),
-                        axios.get(`${BASE_BYBIT}/v5/market/account-ratio`, { params: { category: 'linear', symbol: symbol, period: '1h', limit: 1 } }).catch(() => null)
+                        axios.get(`${BASE_BYBIT}/v5/market/position-ratio`, { params: { category: 'linear', symbol: symbol, period: '1h', limit: 1 } }).catch(() => null)
                     ]);
 
                     if (!topHist?.data || !globHist?.data) return;
@@ -75,13 +76,17 @@ async function scan() {
                         const funding = fundingMap[symbol] ?? 0;
                         if ((side === "LONG" && funding <= -MIN_FUNDING_THRESHOLD) || (side === "SHORT" && funding >= MIN_FUNDING_THRESHOLD)) {
                             
-                            // 🐋 WHALES BYBIT (Dato Informativo con FIX NaN)
+                            // 🐋 WHALES BYBIT (Fixato per "Whale Signals" Position Ratio)
                             let whaleBybitLine = "";
                             if (bybitWhaleRes?.data?.result?.list?.[0]) {
-                                const bRatio = parseFloat(bybitWhaleRes.data.result.list[0].buySellRatio);
-                                if (!isNaN(bRatio)) {
-                                    const ok = (side === "LONG" && bRatio > 1.0) || (side === "SHORT" && bRatio < 1.0);
-                                    whaleBybitLine = `🐋 <b>Whales Bybit:</b> <code>${bRatio.toFixed(2)}:1</code> ${ok ? "✅" : "❌"}\n`;
+                                const bData = bybitWhaleRes.data.result.list[0];
+                                const buyRatio = parseFloat(bData.buyRatio);
+                                const sellRatio = parseFloat(bData.sellRatio);
+                                
+                                if (!isNaN(buyRatio) && !isNaN(sellRatio) && sellRatio !== 0) {
+                                    const finalBRatio = buyRatio / sellRatio;
+                                    const ok = (side === "LONG" && finalBRatio > 1.0) || (side === "SHORT" && finalBRatio < 1.0);
+                                    whaleBybitLine = `🐋 <b>Whales Bybit:</b> <code>${finalBRatio.toFixed(2)}:1</code> ${ok ? "✅" : "❌"}\n`;
                                 }
                             }
 
