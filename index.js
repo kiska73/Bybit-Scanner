@@ -1,14 +1,14 @@
 const axios = require('axios');
 
 // ==========================================================================
-// 🎯 SNIPER ELITE v33.6 - FULL INFO MODE (✅/❌ Status)
+// 🎯 SNIPER ELITE v33.7 - FINAL STABLE (Fix NaN & Bybit Ratio)
 // ==========================================================================
 
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
 const TELEGRAM_CHAT_ID   = '820279313';
 
 const SCAN_INTERVAL = 1000 * 60 * 50; 
-const MIN_FUNDING_THRESHOLD = 0.0001; 
+const MIN_FUNDING_THRESHOLD = 0.0001; // 0.01%
 const SQUEEZE_THRESHOLD = 1.0; 
 
 const BASE_BINANCE = "https://fapi.binance.com";
@@ -75,16 +75,18 @@ async function scan() {
                         const funding = fundingMap[symbol] ?? 0;
                         if ((side === "LONG" && funding <= -MIN_FUNDING_THRESHOLD) || (side === "SHORT" && funding >= MIN_FUNDING_THRESHOLD)) {
                             
-                            // Dati Informativi Bybit Whales
+                            // 🐋 WHALES BYBIT (Dato Informativo con FIX NaN)
                             let whaleBybitLine = "";
                             if (bybitWhaleRes?.data?.result?.list?.[0]) {
                                 const bRatio = parseFloat(bybitWhaleRes.data.result.list[0].buySellRatio);
-                                const ok = (side === "LONG" && bRatio > 1.0) || (side === "SHORT" && bRatio < 1.0);
-                                whaleBybitLine = `🐋 <b>Whales Bybit:</b> <code>${bRatio.toFixed(2)}:1</code> ${ok ? "✅" : "❌"}\n`;
+                                if (!isNaN(bRatio)) {
+                                    const ok = (side === "LONG" && bRatio > 1.0) || (side === "SHORT" && bRatio < 1.0);
+                                    whaleBybitLine = `🐋 <b>Whales Bybit:</b> <code>${bRatio.toFixed(2)}:1</code> ${ok ? "✅" : "❌"}\n`;
+                                }
                             }
 
-                            // Dati Informativi Squeeze
-                            let squeezeLine = "";
+                            // 📊 SQUEEZE & OI INFO
+                            let extraInfo = "";
                             let supply = MANUAL_SUPPLY[asset] || 0;
                             if (supply === 0) {
                                 const sRes = await axios.get(`https://www.binance.com/bapi/composite/v1/public/marketing/tradingPair/detail?symbol=${asset.toLowerCase()}`).catch(() => null);
@@ -96,8 +98,8 @@ async function scan() {
                                 const mcUsd = supply * currentPrice;
                                 const ratio = (oiUsd / mcUsd) * 100;
                                 const fuel = (side === "LONG") ? (ratio * (1/(1+retailRatioB))) : (ratio * (retailRatioB/(1+retailRatioB)));
-                                squeezeLine = `📊 <b>OI/MC Bybit:</b> <code>${ratio.toFixed(2)}%</code>\n` +
-                                              `🔥 <b>Squeeze Pot.:</b> <code>${fuel.toFixed(2)}%</code> ${fuel >= SQUEEZE_THRESHOLD ? "✅" : "❌"}`;
+                                extraInfo = `📊 <b>OI/MC Bybit:</b> <code>${ratio.toFixed(2)}%</code>\n` +
+                                            `🔥 <b>Squeeze:</b> <code>${fuel.toFixed(2)}%</code> ${fuel >= SQUEEZE_THRESHOLD ? "✅" : "❌"}`;
                             }
 
                             const msg = `<b>${side === "LONG" ? "🚀" : "🩸"} ${signalType}</b>\n` +
@@ -106,7 +108,7 @@ async function scan() {
                                          `• Whales: <b>${whalePerc.toFixed(1)}%</b>\n` +
                                          `• Retail: <b>${retailPerc.toFixed(1)}%</b>\n\n` +
                                          `💸 <b>FUNDING:</b> <code>${(funding*100).toFixed(4)}%</code> ⚡\n` +
-                                         whaleBybitLine + squeezeLine;
+                                         whaleBybitLine + extraInfo;
 
                             await sendTelegram(msg);
                         }
