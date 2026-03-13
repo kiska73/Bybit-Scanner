@@ -87,7 +87,7 @@ async function scan() {
                                          `💸 <b>FUNDING:</b> <code>${(funding*100).toFixed(4)}%</code> ${isFundingOk ? "✅" : "❌"}\n` +
                                          `🐋 <b>Whale:</b> <code>${latestWhaleRatio.toFixed(2)}:1</code> ${((side === "LONG" && latestWhaleRatio > 1.1) || (side === "SHORT" && latestWhaleRatio < 0.9)) ? "✅" : "⚠️"}\n` +
                                          `📊 <b>OI/MC:</b> <code>${oiMcRatio.toFixed(2)}%</code> ${oiMcRatio > 0.5 ? "✅" : "❌"}\n` +
-                                         `🔥 <b>Fuel:</b> <code>${fuel.toFixed(2)}</code> ${fuel >= SQUEEZE_THRESHOLD ? "✅ [PRONTO]" : "❌ [SCARICO]"}`;
+                                         `🔥 <b>Fuel:</b> <code>${fuel.toFixed(2)}</code> ${fuel >= SQUEEZE_THRESHOLD ? "✅" : "❌ [SCARICO]"}`;
 
                             await sendTelegram(msg);
                         }
