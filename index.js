@@ -31,7 +31,7 @@ async function scan() {
     try {
         const tickersRes = await axios.get(`${BASE_BINANCE}/fapi/v1/ticker/24hr`);
         const symbols = tickersRes.data
-            .filter(t => parseFloat(t.quoteVolume) > 10000000 && t.symbol.endsWith('USDT'))
+            .filter(t => parseFloat(t.quoteVolume) > 7000000 && t.symbol.endsWith('USDT'))
             .sort((a,b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume));
 
         for (let i = 0; i < symbols.length; i += 3) {
