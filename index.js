@@ -94,7 +94,7 @@ async function scan() {
                                 const ratio = (oiUsd / mcUsd) * 100;
                                 const fuel = (side === "LONG") ? (ratio * (1/(1+curRetailB))) : (ratio * (curRetailB/(1+curRetailB)));
                                 oiInfo = `\n📊 <b>OI/MC Bybit:</b> <code>${ratio.toFixed(2)}%</code>\n` +
-                                         `🔥 <b>Squeeze Pot.:</b> <code>${fuel.toFixed(2)}%</code> ${fuel >= SQUEEZE_THRESHOLD ? "✅" : "❌"}`;
+                                         `🔥 <b>Squeeze.:</b> <code>${fuel.toFixed(2)}%</code> ${fuel >= SQUEEZE_THRESHOLD ? "✅" : "❌"}`;
                             }
 
                             // MESSAGGIO UNICO COMPATTO
