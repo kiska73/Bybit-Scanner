@@ -80,14 +80,14 @@ async function scan() {
 
                             const msg = `<b>${side === "LONG" ? "🚀" : "🩸"} ${signalType}</b>\n` +
                                          `#${symbol} @ ${currentPrice}\n\n` +
-                                         `📊 <b>PERCENTILI (Binance):</b>\n` +
+                                         `📊 <b>PERCENTILI:</b>\n` +
                                          `• Whales: <b>${whalePerc.toFixed(1)}%</b>\n` +
                                          `• Retail: <b>${retailPerc.toFixed(1)}%</b>\n\n` +
                                          `📈 <b>OI 1h:</b> <code>${oiChange > 0 ? "+" : ""}${oiChange.toFixed(2)}%</code> ${oiChange > 2 ? "🔥" : ""}\n` +
                                          `💸 <b>FUNDING:</b> <code>${(funding*100).toFixed(4)}%</code> ${isFundingOk ? "✅" : "❌"}\n` +
-                                         `🐋 <b>Whale Ratio:</b> <code>${latestWhaleRatio.toFixed(2)}:1</code> ${((side === "LONG" && latestWhaleRatio > 1.1) || (side === "SHORT" && latestWhaleRatio < 0.9)) ? "✅" : "⚠️"}\n` +
-                                         `📊 <b>OI/MC Ratio:</b> <code>${oiMcRatio.toFixed(2)}%</code> ${oiMcRatio > 0.5 ? "✅" : "❌"}\n` +
-                                         `🔥 <b>Squeeze Fuel:</b> <code>${fuel.toFixed(2)}</code> ${fuel >= SQUEEZE_THRESHOLD ? "✅ [PRONTO]" : "❌ [SCARICO]"}`;
+                                         `🐋 <b>Whale:</b> <code>${latestWhaleRatio.toFixed(2)}:1</code> ${((side === "LONG" && latestWhaleRatio > 1.1) || (side === "SHORT" && latestWhaleRatio < 0.9)) ? "✅" : "⚠️"}\n` +
+                                         `📊 <b>OI/MC:</b> <code>${oiMcRatio.toFixed(2)}%</code> ${oiMcRatio > 0.5 ? "✅" : "❌"}\n` +
+                                         `🔥 <b>Fuel:</b> <code>${fuel.toFixed(2)}</code> ${fuel >= SQUEEZE_THRESHOLD ? "✅ [PRONTO]" : "❌ [SCARICO]"}`;
 
                             await sendTelegram(msg);
                         }
