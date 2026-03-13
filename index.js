@@ -1,7 +1,7 @@
 const axios = require('axios');
 
 // ==========================================================================
-// 🎯 SNIPER ELITE v33.9 - FINAL STABLE (Fix Missing Data & 1000-Prefix)
+// 🎯 SNIPER ELITE v34.2 - BINANCE DATA ONLY (Ultra Reliable)
 // ==========================================================================
 
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
@@ -12,8 +12,6 @@ const MIN_FUNDING_THRESHOLD = 0.0001;
 const SQUEEZE_THRESHOLD = 1.0; 
 
 const BASE_BINANCE = "https://fapi.binance.com";
-const BASE_BYBIT = "https://api.bybit.com";
-
 const MANUAL_SUPPLY = { 'PIPPIN': 1000000000, 'PNUT': 1000000000, 'ACT': 1000000000, 'RIVER': 1000000000 };
 
 let scanning = false;
@@ -49,27 +47,20 @@ async function scan() {
                 const asset = symbol.replace('USDT', '');
                 const currentPrice = parseFloat(t.lastPrice);
 
-                // FIX: Prova il simbolo normale, se fallisce Bybit spesso usa 1000+Asset
-                let bybitSymbol = symbol;
-
                 try {
-                    const [topHist, globHist, bybitOIRes, bybitWhaleRes] = await Promise.all([
+                    // Recupero Dati Binance (Top Traders & Open Interest)
+                    const [topHist, globHist, oiRes] = await Promise.all([
                         axios.get(`${BASE_BINANCE}/futures/data/topLongShortPositionRatio`, { params: { symbol, period: '1h', limit: 500 } }).catch(() => null),
                         axios.get(`${BASE_BINANCE}/futures/data/globalLongShortAccountRatio`, { params: { symbol, period: '1h', limit: 500 } }).catch(() => null),
-                        axios.get(`${BASE_BYBIT}/v5/market/open-interest`, { params: { category: 'linear', symbol: bybitSymbol, intervalTime: '1h' } }).catch(async () => {
-                             // Se fallisce, prova con prefisso 1000 (es. 1000RIVERUSDT)
-                             bybitSymbol = `1000${asset}USDT`;
-                             return axios.get(`${BASE_BYBIT}/v5/market/open-interest`, { params: { category: 'linear', symbol: bybitSymbol, intervalTime: '1h' } }).catch(() => null);
-                        }),
-                        axios.get(`${BASE_BYBIT}/v5/market/position-ratio`, { params: { category: 'linear', symbol: bybitSymbol, period: '1h', limit: 1 } }).catch(() => null)
+                        axios.get(`${BASE_BINANCE}/fapi/v1/openInterest`, { params: { symbol } }).catch(() => null)
                     ]);
 
-                    if (!topHist?.data || !globHist?.data) return;
+                    if (!topHist?.data || !globHist?.data || !oiRes?.data) return;
 
-                    const whaleRatioB = parseFloat(topHist.data[topHist.data.length - 1].longShortRatio);
+                    const latestWhaleRatio = parseFloat(topHist.data[topHist.data.length - 1].longShortRatio);
                     const retailRatioB = parseFloat(globHist.data[globHist.data.length - 1].longShortRatio);
                     
-                    const whalePerc = ((topHist.data.filter(h => parseFloat(h.longShortRatio) <= whaleRatioB).length) / topHist.data.length) * 100;
+                    const whalePerc = ((topHist.data.filter(h => parseFloat(h.longShortRatio) <= latestWhaleRatio).length) / topHist.data.length) * 100;
                     const retailPerc = ((globHist.data.filter(h => parseFloat(h.longShortRatio) <= retailRatioB).length) / globHist.data.length) * 100;
 
                     let signalType = ""; let side = "";
@@ -82,18 +73,10 @@ async function scan() {
                         const funding = fundingMap[symbol] ?? 0;
                         if ((side === "LONG" && funding <= -MIN_FUNDING_THRESHOLD) || (side === "SHORT" && funding >= MIN_FUNDING_THRESHOLD)) {
                             
-                            let whaleBybitLine = "";
-                            if (bybitWhaleRes?.data?.result?.list?.[0]) {
-                                const bData = bybitWhaleRes.data.result.list[0];
-                                const buyRatio = parseFloat(bData.buyRatio);
-                                const sellRatio = parseFloat(bData.sellRatio);
-                                if (!isNaN(buyRatio) && !isNaN(sellRatio) && sellRatio !== 0) {
-                                    const finalBRatio = buyRatio / sellRatio;
-                                    const ok = (side === "LONG" && finalBRatio > 1.0) || (side === "SHORT" && finalBRatio < 1.0);
-                                    whaleBybitLine = `🐋 <b>Whales Bybit:</b> <code>${finalBRatio.toFixed(2)}:1</code> ${ok ? "✅" : "❌"}\n`;
-                                }
-                            }
+                            // Replicazione Whale Signal (Binance Top Traders)
+                            const whaleLine = `🐋 <b>Whales Binance:</b> <code>${latestWhaleRatio.toFixed(2)}:1</code> ${((side === "LONG" && latestWhaleRatio > 1) || (side === "SHORT" && latestWhaleRatio < 1)) ? "✅" : "❌"}\n`;
 
+                            // Calcolo Squeeze su Binance
                             let extraInfo = "";
                             let supply = MANUAL_SUPPLY[asset] || 0;
                             if (supply === 0) {
@@ -101,14 +84,11 @@ async function scan() {
                                 supply = parseFloat(sRes?.data?.data?.[0]?.circulatingSupply) || 0;
                             }
 
-                            if (bybitOIRes?.data?.result?.list?.[0] && supply > 0) {
-                                const oiRaw = parseFloat(bybitOIRes.data.result.list[0].openInterest);
-                                // Se il simbolo è 1000X, l'OI va diviso per 1000 per confrontarlo con la supply reale
-                                const oiUsd = (bybitSymbol.startsWith('1000') ? (oiRaw / 1000) : oiRaw) * currentPrice;
-                                const mcUsd = supply * currentPrice;
-                                const ratio = (oiUsd / mcUsd) * 100;
+                            if (supply > 0) {
+                                const oiUsd = parseFloat(oiRes.data.openInterest) * currentPrice;
+                                const ratio = (oiUsd / (supply * currentPrice)) * 100;
                                 const fuel = (side === "LONG") ? (ratio * (1/(1+retailRatioB))) : (ratio * (retailRatioB/(1+retailRatioB)));
-                                extraInfo = `📊 <b>OI/MC Bybit:</b> <code>${ratio.toFixed(2)}%</code>\n` +
+                                extraInfo = `📊 <b>OI/MC:</b> <code>${ratio.toFixed(2)}%</code>\n` +
                                             `🔥 <b>Squeeze:</b> <code>${fuel.toFixed(2)}%</code> ${fuel >= SQUEEZE_THRESHOLD ? "✅" : "❌"}`;
                             }
 
@@ -118,7 +98,7 @@ async function scan() {
                                          `• Whales: <b>${whalePerc.toFixed(1)}%</b>\n` +
                                          `• Retail: <b>${retailPerc.toFixed(1)}%</b>\n\n` +
                                          `💸 <b>FUNDING:</b> <code>${(funding*100).toFixed(4)}%</code> ⚡\n` +
-                                         whaleBybitLine + extraInfo;
+                                         whaleLine + extraInfo;
 
                             await sendTelegram(msg);
                         }
