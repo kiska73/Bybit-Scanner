@@ -94,7 +94,7 @@ async function scan() {
                                          `• Retail: <b>${retailPerc.toFixed(1)}%</b>\n\n` +
                                          `📈 <b>OI 1h:</b> <code>${oiChange > 0 ? "+" : ""}${oiChange.toFixed(2)}%</code> ${oiChange > 2 ? "🔥" : ""}\n` +
                                          `💸 <b>FUND.:</b> <code>${(funding*100).toFixed(4)}%</code> ${isFundingOk ? "✅" : "❌"}\n` +
-                                         `🐋 <b>Whale Ratio:</b> <code>${latestWhaleRatio.toFixed(2)}:1</code> ✅\n` +
+                                         `🐋 <b>Whale:</b> <code>${latestWhaleRatio.toFixed(2)}:1</code> ✅\n` +
                                          `📊 <b>OI/MC:</b> <code>${oiMcRatio.toFixed(2)}%</code> ${oiMcRatio > 0.5 ? "✅" : "❌"}\n` +
                                          `🔥 <b>Fuel:</b> <code>${fuel.toFixed(2)}</code> ${fuel >= SQUEEZE_THRESHOLD ? "✅" : "❌"}`;
 
