@@ -1,7 +1,7 @@
 const axios = require('axios');
 
 // ==========================================================================
-// 🎯 SNIPER ELITE v37.0 - FULL VISUAL CHECK (Spunte & Squeeze Logic)
+// 🎯 SNIPER ELITE v37.1 - AGGIORNATO (Whale Ratio 1.4:1)
 // ==========================================================================
 
 const TELEGRAM_BOT_TOKEN = '6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s';
@@ -10,6 +10,7 @@ const TELEGRAM_CHAT_ID   = '820279313';
 const SCAN_INTERVAL = 1000 * 60 * 50; 
 const MIN_FUNDING_THRESHOLD = 0.0001; 
 const SQUEEZE_THRESHOLD = 1.0; 
+const MIN_WHALE_RATIO = 1.4; // <--- Nuova condizione richiesta
 
 const BASE_BINANCE = "https://fapi.binance.com";
 
@@ -65,6 +66,14 @@ async function scan() {
                     else if (whalePerc < 10 && retailPerc < 10) { signalType = "CONCORDANZA SHORT"; side = "SHORT"; }
 
                     if (side !== "") {
+                        // --- APPLICAZIONE FILTRO WHALE RATIO MINIMO ---
+                        // Per il LONG: Ratio deve essere >= 1.4
+                        // Per lo SHORT: Ratio deve essere <= 1/1.4 (ovvero circa 0.71)
+                        const isWhaleRatioStrong = (side === "LONG" && latestWhaleRatio >= MIN_WHALE_RATIO) || 
+                                                   (side === "SHORT" && latestWhaleRatio <= (1 / MIN_WHALE_RATIO));
+
+                        if (!isWhaleRatioStrong) return; 
+
                         const funding = fundRes?.data?.[0] ? parseFloat(fundRes.data[0].fundingRate) : 0;
                         const isFundingOk = (side === "LONG" && funding < 0) || (side === "SHORT" && funding > 0);
                         
@@ -85,7 +94,7 @@ async function scan() {
                                          `• Retail: <b>${retailPerc.toFixed(1)}%</b>\n\n` +
                                          `📈 <b>OI 1h:</b> <code>${oiChange > 0 ? "+" : ""}${oiChange.toFixed(2)}%</code> ${oiChange > 2 ? "🔥" : ""}\n` +
                                          `💸 <b>FUND.:</b> <code>${(funding*100).toFixed(4)}%</code> ${isFundingOk ? "✅" : "❌"}\n` +
-                                         `🐋 <b>Whale:</b> <code>${latestWhaleRatio.toFixed(2)}:1</code> ${((side === "LONG" && latestWhaleRatio > 1.1) || (side === "SHORT" && latestWhaleRatio < 0.9)) ? "✅" : "⚠️"}\n` +
+                                         `🐋 <b>Whale Ratio:</b> <code>${latestWhaleRatio.toFixed(2)}:1</code> ✅\n` +
                                          `📊 <b>OI/MC:</b> <code>${oiMcRatio.toFixed(2)}%</code> ${oiMcRatio > 0.5 ? "✅" : "❌"}\n` +
                                          `🔥 <b>Fuel:</b> <code>${fuel.toFixed(2)}</code> ${fuel >= SQUEEZE_THRESHOLD ? "✅" : "❌"}`;
 
